@@ -305,6 +305,12 @@ export function getBaseStyles() {
       z-index: 1001;
     }
 
+    /* 拖拽中：禁用过渡，避免位置跟手时出现回弹 */
+    .action-menu-float.dragging,
+    .action-menu-float.dragging .main-action-button {
+      transition: none !important;
+    }
+
     .main-action-button {
       background: #8e44ad;
       color: white;
@@ -313,7 +319,7 @@ export function getBaseStyles() {
       height: 48px;
       border-radius: 50%;
       font-size: 20px;
-      cursor: pointer;
+      cursor: grab;
       transition: all 0.3s ease;
       display: flex;
       align-items: center;
@@ -326,6 +332,47 @@ export function getBaseStyles() {
       -ms-user-select: none;
       user-select: none;
       outline: none;
+      touch-action: none;
+      animation: fab-breath 4s ease-in-out infinite;
+    }
+
+    /* 轻微的呼吸灯效果：紫色光晕缓慢明暗 */
+    @keyframes fab-breath {
+      0%, 100% {
+        box-shadow:
+          var(--action-btn-shadow),
+          0 0 0 0 rgba(142, 68, 173, 0);
+      }
+      50% {
+        box-shadow:
+          var(--action-btn-shadow),
+          0 0 14px 3px rgba(142, 68, 173, 0.85);
+      }
+    }
+
+    /* 激活 / 拖拽时暂停呼吸，避免与其他状态视觉冲突 */
+    .main-action-button.active,
+    .action-menu-float.dragging .main-action-button {
+      animation: none;
+    }
+
+    /* 悬停暂停仅在支持 hover 的设备启用：
+       触摸设备点按后 :hover 会粘滞在按钮上，若不加保护呼吸灯将一直停到用户点击别处 */
+    @media (hover: hover) {
+      .main-action-button:hover {
+        animation: none;
+      }
+    }
+
+    /* 尊重系统的"减弱动效"无障碍偏好 */
+    @media (prefers-reduced-motion: reduce) {
+      .main-action-button {
+        animation: none;
+      }
+    }
+
+    .action-menu-float.dragging .main-action-button {
+      cursor: grabbing;
     }
 
     .main-action-button:hover {

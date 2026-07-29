@@ -6,6 +6,7 @@
 
 import { getStyles } from './styles/index.js';
 import { getScripts, getCoreScripts } from './scripts/index.js';
+import { APP_VERSION } from '../utils/version.js';
 
 /**
  * 创建主页面（密钥管理界面）
@@ -45,7 +46,7 @@ function getHTMLStart() {
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>2FA - 密钥管理器</title>
 
   <!-- PWA Manifest -->
@@ -96,6 +97,31 @@ function getHTMLStart() {
         // Fallback to light theme if localStorage access fails
         document.documentElement.setAttribute('data-theme', 'light');
       }
+    })();
+  </script>
+
+  <!-- FAB 位置预注入 - Must run before paint to prevent FAB position flash -->
+  <script>
+    (function() {
+      try {
+        const raw = localStorage.getItem('2fa-fab-position');
+        if (!raw) return;
+        const pos = JSON.parse(raw);
+        if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y)) return;
+        const vw = window.innerWidth || document.documentElement.clientWidth;
+        const vh = window.innerHeight || document.documentElement.clientHeight;
+        // 与 CSS 媒体查询保持一致：≤480px 时 FAB 为 40x40，其余 48x48
+        const size = vw <= 480 ? 40 : 48;
+        const margin = 8;
+        const maxX = Math.max(margin, vw - size - margin);
+        const maxY = Math.max(margin, vh - size - margin);
+        const x = Math.min(Math.max(pos.x, margin), maxX);
+        const y = Math.min(Math.max(pos.y, margin), maxY);
+        const style = document.createElement('style');
+        style.id = 'fab-init-position';
+        style.textContent = '.action-menu-float{left:' + x + 'px !important;top:' + y + 'px !important;right:auto !important;bottom:auto !important;}';
+        document.head.appendChild(style);
+      } catch (e) {}
     })();
   </script>`;
 }
@@ -1557,6 +1583,11 @@ function getHTMLBody() {
         请输入密码以管理密钥<br>
         <small class="login-modal-hint">或点击"取消"使用 OTP 生成功能</small>
       </p>
+      <div id="loginInsecureWarning" class="login-insecure-warning" style="display: none;">
+        <strong>⚠️ 当前正通过 HTTP 访问</strong>
+        浏览器无法在 HTTP 下保存登录状态，登录后仍会反复要求输入密码。请将地址栏中的 http:// 改为 https:// 后重新访问。
+      </div>
+      <form id="loginForm" onsubmit="event.preventDefault(); handleLoginSubmit(); return false;" autocomplete="on">
       <div class="form-group">
         <label for="loginToken">密码</label>
         <div class="login-password-wrapper">
@@ -1599,14 +1630,15 @@ function getHTMLBody() {
         </div>
       </div>
       <div class="button-group login-modal-actions">
-        <button onclick="window.location.href='/otp'" class="btn btn-secondary login-modal-cancel-btn">
+        <button type="button" onclick="window.location.href='/otp'" class="btn btn-secondary login-modal-cancel-btn">
           取消
         </button>
-        <button onclick="handleLoginSubmit()" class="btn btn-primary login-modal-submit-btn">
+        <button type="submit" class="btn btn-primary login-modal-submit-btn">
           登录
         </button>
       </div>
       <div id="loginError" class="login-modal-error"></div>
+      </form>
     </div>
   </div>
 
@@ -1631,6 +1663,9 @@ function getHTMLBody() {
       </div>
       <div class="footer-info">
         Made with ❤️ by <a href="https://github.com/wuzf" target="_blank" rel="noopener noreferrer" class="footer-link">wuzf</a>
+        <span class="footer-separator">•</span>
+        <span class="footer-version">v${APP_VERSION}</span>
+        <a id="footerUpdateBadge" class="footer-update-badge" href="https://github.com/wuzf/2fa" target="_blank" rel="noopener noreferrer" style="display: none;"></a>
       </div>
     </div>
   </footer>
@@ -1683,13 +1718,9 @@ function getHTMLBody() {
  */
 function getHTMLScripts(lazyLoad = true) {
 	const scriptContent = getInlineScripts(lazyLoad);
-	// 🔄 使用 CDN 作为主要来源（Service Worker 会自动缓存）
-	// jsQR 用于二维码扫描，qrcode-generator 用于二维码生成
-	return (
-		'<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js" crossorigin="anonymous"></script>\n<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js" crossorigin="anonymous"></script>\n<script>\n' +
-		scriptContent +
-		'\n</script>'
-	);
+	// jsQR / qrcode-generator 改为按需加载（见 utils.js 中的 ensureJsQR / ensureQRCodeGen），
+	// 避免 ~150KB CDN 库阻塞首屏渲染。Service Worker 会在首次请求时按需缓存这两个 URL。
+	return '<script>\n' + scriptContent + '\n</script>';
 }
 
 /**
