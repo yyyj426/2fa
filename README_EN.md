@@ -2,7 +2,7 @@
 
 A two-factor authentication key management system built on Cloudflare Workers. Free to deploy, globally accelerated, with PWA offline support.
 
-![Version](https://img.shields.io/badge/version-1.6.0-blue)
+![Version](https://img.shields.io/badge/version-1.7.1-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Cloudflare%20Workers-orange)
 
@@ -203,10 +203,6 @@ Welcome to submit [Issues](https://github.com/wuzf/2fa/issues) and [Pull Request
 ## 📄 License
 
 [MIT License](LICENSE)
-
-## 🌟 Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=wuzf/2fa&type=date&legend=top-left)](https://www.star-history.com/#wuzf/2fa&type=date&legend=top-left)
 
 ---
 

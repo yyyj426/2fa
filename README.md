@@ -4,7 +4,7 @@
 
 **[English](README_EN.md)**
 
-![Version](https://img.shields.io/badge/version-1.6.0-blue)
+![Version](https://img.shields.io/badge/version-1.7.1-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Cloudflare%20Workers-orange)
 
@@ -203,10 +203,6 @@ https://your-worker.workers.dev/otp/YOUR_SECRET_KEY?type=hotp&counter=5
 ## 📄 许可证
 
 [MIT License](LICENSE)
-
-## 🌟 Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=wuzf/2fa&type=date&legend=top-left)](https://www.star-history.com/#wuzf/2fa&type=date&legend=top-left)
 
 ---
 
