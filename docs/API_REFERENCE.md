@@ -128,7 +128,7 @@ Set-Cookie: auth_token=<NEW_JWT_TOKEN>; HttpOnly; Secure; SameSite=Strict; Max-A
 
 ## 端点列表
 
-限流列表示当前应用代码实际调用的限流规则；`-` 表示没有显式调用应用限流，不代表每个端点都有独立配额。共享计数方式见 [Rate Limiting](#rate-limiting)。
+限流列表示当前应用代码实际调用的限流规则；`-` 表示没有显式调用应用限流。各类操作分别计数，计数方式见 [Rate Limiting](#rate-limiting)。
 
 | 端点                                               | 方法   | 认证 | 限流   | 描述                         |
 | -------------------------------------------------- | ------ | ---- | ------ | ---------------------------- |
@@ -179,6 +179,8 @@ Set-Cookie: auth_token=<NEW_JWT_TOKEN>; HttpOnly; Secure; SameSite=Strict; Max-A
 ---
 
 ## 密钥管理 API
+
+同时到达的新增、编辑、删除、批量导入、HOTP 计数器递增和恢复备份按到达顺序依次执行，每个请求都基于前一个请求保存后的数据，不会互相覆盖。
 
 ### 获取所有密钥
 
@@ -503,7 +505,7 @@ Cookie: auth_token=<JWT_TOKEN>
 | 400    | 字段校验信息                                 | 请求体缺字段或类型错误                                                               |
 | 400    | `路径中的密钥ID编码无效`                     | 路径中的 `id` 不是合法的百分号编码                                                   |
 | 404    | 密钥不存在                                   | `id` 不存在                                                                          |
-| 409    | `只有HOTP密钥可以递增计数器`                 | 目标是 TOTP 或 Steam 密钥                                                            |
+| 409    | `只有HOTP密钥可以递增计数器`                 | 目标不是 HOTP 密钥                                                                   |
 | 409    | `HOTP生成参数已变更，请刷新后重试`           | 密钥、位数、算法或 namespace 与服务端不一致，`details.currentCounter` 为服务端当前值 |
 | 409    | `HOTP计数器已变更，请刷新后重试`             | 计数器已被其他设备推进，`details` 含 `expectedCounter` 与 `currentCounter`           |
 | 409    | `HOTP计数器已达到安全整数上限，无法继续递增` | 计数器已是 `Number.MAX_SAFE_INTEGER`                                                 |
@@ -1436,7 +1438,7 @@ S3 返回相同的外层结构，各目标的 `config` 为：
 }
 ```
 
-S3 的成功消息为 `S3 配置已删除`。缺少 `id` 返回 400，目标不存在返回 404。保存、删除、测试、切换接口均使用 `sensitive` 限流（10 次 / 分钟），共享计数方式见 [Rate Limiting](#rate-limiting)。
+S3 的成功消息为 `S3 配置已删除`。缺少 `id` 返回 400，目标不存在返回 404。保存、删除、测试、切换接口均使用 `sensitive` 限流（10 次 / 分钟），四个接口共用一个 S3 计数，见 [Rate Limiting](#rate-limiting)。
 
 ---
 
@@ -1919,6 +1921,9 @@ Cache-Control: no-store
 | **409** | Conflict              | 资源冲突（如重复添加） |
 | **429** | Too Many Requests     | 超过限流限制           |
 | **500** | Internal Server Error | 服务器内部错误         |
+| **503** | Service Unavailable   | 存储服务暂时不可用     |
+
+读写密钥的请求由 Durable Object `SECRETS_STORE` 依次处理（见 [部署指南：存储绑定](DEPLOYMENT.md#存储绑定)）。修改请求无法送达它时返回 503，`error` 为 `存储服务暂时不可用`，`message` 为 `无法确认本次修改是否已保存，请刷新后重试`：修改可能已经保存，重试前先刷新列表确认。读取请求在这种情况下改为直接读取 KV，可能暂时看到稍旧的列表。
 
 ### 错误响应格式
 
@@ -2017,7 +2022,7 @@ Cache-Control: no-store
 | 批量添加密钥 (`POST /api/secrets/batch`)                   | 20 次    | 5 分钟   | `bulk`      |
 | 批量导出密钥 (`POST /api/secrets/export`)                  | 10 次    | 1 分钟   | `sensitive` |
 
-除批量导出使用 `export:<IP>` 外，上表操作均直接使用客户端 IP 作为键，共享 `ratelimit:v2:<IP>` 记录。因此表中数字是处理当前请求时使用的阈值，并非各接口互相独立的配额；不同操作可能相互影响。
+每类操作用 `scopedRateLimitKey(操作名, IP)` 生成自己的键（如 `login:<IP>`、`settings:<IP>`、`export:<IP>`），记录在 `ratelimit:v2:<键>`，因此一类操作不会用掉另一类的配额，例如连续删除账户不会挡住登录。同一类的多个接口共用一个计数：WebDAV 的保存、删除、连接测试、切换启用状态共用 `webdav:<IP>`，S3、OneDrive、Google Drive 同理。
 
 密钥读取/新增/更新、HOTP 计数器操作、备份列表/导出/恢复、系统设置和云盘配置读取、时间校准、Token 刷新、OAuth 回调、Favicon 代理以及公开 OTP 生成，当前没有显式应用限流。`api`（30 次 / 分钟）和 `global`（100 次 / 分钟）虽然定义在预设中，但当前路由未使用这些预设。
 
@@ -2089,7 +2094,7 @@ X-RateLimit-Algorithm: sliding-window
 **实现说明**:
 
 - 基于 Cloudflare KV 存储限流状态
-- 客户端 IP 优先取 `CF-Connecting-IP`，其次为 `X-Real-IP`、`X-Forwarded-For` 的首项；缺失时使用 `unknown`。除批量导出带 `export:` 前缀外，其余已接入限流的操作共享该 IP 的记录
+- 客户端 IP 优先取 `CF-Connecting-IP`，其次为 `X-Real-IP`、`X-Forwarded-For` 的首项；缺失时使用 `unknown`。限流键为 `操作名:IP`，每类操作单独计数
 - KV 自动过期机制确保窗口状态自动清理
 - 限流检查失败时采用 "fail open" 策略（允许请求通过，不影响正常用户）
 
@@ -2240,26 +2245,6 @@ if login_response.ok:
     )
     print('添加结果:', add_response.json())
 ```
-
----
-
-## Webhook 集成（计划中）
-
-> **状态**: 🚧 计划中，尚未实现
-
-未来版本将支持 Webhook 集成，用于：
-
-- 密钥添加/删除通知
-- 备份完成通知
-- 异常登录警报
-
----
-
-## GraphQL API（计划中）
-
-> **状态**: 🚧 计划中，尚未实现
-
-未来版本可能提供 GraphQL 端点，提供更灵活的数据查询。
 
 ---
 

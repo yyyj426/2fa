@@ -24,7 +24,13 @@ import {
 } from '../../utils/validation.js';
 import { createJsonResponse, createErrorResponse, createSuccessResponse } from '../../utils/response.js';
 import { getSecurityHeaders } from '../../utils/security.js';
-import { checkRateLimit, getClientIdentifier, createRateLimitResponse, RATE_LIMIT_PRESETS } from '../../utils/rateLimit.js';
+import {
+	checkRateLimit,
+	scopedRateLimitKey,
+	getClientIdentifier,
+	createRateLimitResponse,
+	RATE_LIMIT_PRESETS,
+} from '../../utils/rateLimit.js';
 import {
 	ValidationError,
 	NotFoundError,
@@ -324,7 +330,7 @@ export async function handleDeleteSecret(request, env, ctx) {
 	try {
 		// Rate Limiting: 敏感操作限流
 		const clientIP = getClientIdentifier(request, 'ip');
-		const rateLimitInfo = await checkRateLimit(clientIP, env, RATE_LIMIT_PRESETS.sensitive);
+		const rateLimitInfo = await checkRateLimit(scopedRateLimitKey('delete-secret', clientIP), env, RATE_LIMIT_PRESETS.sensitive);
 
 		if (!rateLimitInfo.allowed) {
 			logger.warn('删除密钥被限流', { clientIP, operation: 'handleDeleteSecret' });
@@ -355,7 +361,13 @@ export async function handleDeleteSecret(request, env, ctx) {
 
 		// 保存到 KV (自动加密、排序、触发备份)
 		await saveSecretsToKV(env, existingSecrets, 'secret-deleted', {}, ctx);
-		await deleteHOTPCounterState(env, deletedSecret);
+		try {
+			await deleteHOTPCounterState(env, deletedSecret);
+		} catch (cleanupError) {
+			// The secret is already deleted. Its counter record is no longer referenced by
+			// any secret and is removed by the next counter cleanup.
+			logger.warn('删除HOTP计数器记录失败，密钥已删除', { secretId: deletedSecret.id, errorMessage: cleanupError.message });
+		}
 
 		logger.info('密钥删除成功', {
 			operation: 'handleDeleteSecret',
