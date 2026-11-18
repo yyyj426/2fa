@@ -1,5 +1,6 @@
 import { getRequestLanguage } from '../utils/i18n.js';
 import { getStandaloneText } from './standalone.js';
+import { getPublicAppearanceBackdrop } from './publicAppearance.js';
 
 /**
  * PWA Manifest 生成模块
@@ -11,11 +12,19 @@ import { getStandaloneText } from './standalone.js';
  * @param {Request} request - HTTP 请求对象（用于获取主机名）
  * @returns {Response} Manifest JSON 响应
  */
-export function createManifest(request) {
+export function createManifest(request, appearance = null) {
 	const url = new URL(request.url);
 	const baseUrl = `${url.protocol}//${url.host}`;
 	const language = getRequestLanguage(request, 'en');
 	const t = (key) => getStandaloneText(language, key);
+	const safeMode = url.searchParams.get('safeMode') === '1' || url.searchParams.get('disableCustomCode') === '1';
+	const defaultIcon = (size) => `${baseUrl}/icon-${size}.png${safeMode ? '?safeMode=1' : ''}`;
+	// Android colors an installed app's navigation bar with theme_color, one color
+	// for light and dark mode alike, and only when the installed app updates.
+	// Without it Chrome paints the bar black rather than following the phone's
+	// mode. Under an app theme both the bar and the splash screen use the theme's
+	// light background; the page's theme-color still colors the status bar.
+	const backdrop = safeMode ? null : getPublicAppearanceBackdrop(appearance);
 
 	// 简化的 Manifest 配置，确保最佳兼容性
 	const manifest = {
@@ -23,29 +32,29 @@ export function createManifest(request) {
 		short_name: '2FA',
 		lang: language,
 		description: t('manifestDescription'),
-		start_url: '/',
+		start_url: safeMode ? '/?safeMode=1' : '/',
 		display: 'standalone',
-		background_color: '#ffffff',
-		theme_color: '#2196F3',
+		background_color: backdrop || '#ffffff',
+		theme_color: backdrop || '#2196F3',
 		orientation: 'portrait-primary',
 		scope: '/',
 
 		// 使用 SVG 格式图标（声明为 any 类型以提高兼容性）
 		icons: [
 			{
-				src: `${baseUrl}/icon-192.png`,
+				src: defaultIcon(192),
 				sizes: '192x192',
 				type: 'image/svg+xml',
 				purpose: 'any',
 			},
 			{
-				src: `${baseUrl}/icon-512.png`,
+				src: defaultIcon(512),
 				sizes: '512x512',
 				type: 'image/svg+xml',
 				purpose: 'any',
 			},
 			{
-				src: `${baseUrl}/icon-192.png`,
+				src: defaultIcon(192),
 				sizes: '192x192',
 				type: 'image/svg+xml',
 				purpose: 'maskable',
@@ -62,13 +71,13 @@ export function createManifest(request) {
 				name: t('manifestAdd'),
 				short_name: t('manifestAddShort'),
 				description: t('manifestAddDescription'),
-				url: '/?action=add',
+				url: safeMode ? '/?safeMode=1&action=add' : '/?action=add',
 			},
 			{
 				name: t('manifestScan'),
 				short_name: t('manifestScanShort'),
 				description: t('manifestScanDescription'),
-				url: '/?action=scan',
+				url: safeMode ? '/?safeMode=1&action=scan' : '/?action=scan',
 			},
 		],
 
@@ -82,7 +91,7 @@ export function createManifest(request) {
 		protocol_handlers: [
 			{
 				protocol: 'web+otpauth',
-				url: '/?otpauth=%s',
+				url: safeMode ? '/?safeMode=1&otpauth=%s' : '/?otpauth=%s',
 			},
 		],
 	};
@@ -91,7 +100,7 @@ export function createManifest(request) {
 		status: 200,
 		headers: {
 			'Content-Type': 'application/manifest+json',
-			'Cache-Control': 'public, max-age=3600',
+			'Cache-Control': appearance ? 'no-cache' : 'public, max-age=3600',
 			'Access-Control-Allow-Origin': '*',
 			'Content-Language': language,
 			Vary: 'Accept-Language, X-Language',

@@ -26,24 +26,33 @@ import {
 	handleUpdateSecret,
 } from '../api/secrets/index.js';
 import { getAllSecrets } from '../api/secrets/shared.js';
+import { handleGetSettings, handleSaveSettings } from '../api/settings.js';
 import { deleteInactiveHOTPCounterStates, HOTP_COUNTER_EPOCH_KEY, HOTP_COUNTER_STATE_PREFIX } from '../api/secrets/counter-state.js';
 import { KV_KEYS } from '../utils/constants.js';
+import { getSettings, KV_SETTINGS_KEY } from '../utils/settings.js';
 import { createErrorResponse } from '../utils/response.js';
 import { getLogger } from '../utils/logger.js';
 import { createConsistentKV } from './consistent-kv.js';
+import { ThemeStore, THEME_OWNER_KEY } from './theme-store.js';
+import { THEME_OPERATION_HEADER } from '../api/themes.js';
 
 export const SECRETS_STORE_OPERATION_HEADER = 'X-2FA-Store-Operation';
 const SECRETS_STORE_NAME = 'secrets';
 const INTERNAL_URL = 'https://secrets-store.internal/';
+const SETTINGS_SAVE_INTERVAL = 1100;
 
-/** Keys whose reads must see every earlier write: the secrets document and the HOTP counters. */
+/** Keys whose reads must see every earlier write: secrets, HOTP counters and settings. */
 export function isSecretsStoreKey(key) {
 	return (
-		typeof key === 'string' && (key === KV_KEYS.SECRETS || key === HOTP_COUNTER_EPOCH_KEY || key.startsWith(HOTP_COUNTER_STATE_PREFIX))
+		typeof key === 'string' &&
+		(key === KV_KEYS.SECRETS || key === HOTP_COUNTER_EPOCH_KEY || key.startsWith(HOTP_COUNTER_STATE_PREFIX) || key === KV_SETTINGS_KEY)
 	);
 }
 
 const OPERATIONS = {
+	// A stale settings read can later overwrite saved code through a partial edit.
+	'settings.get': { readOnly: true, fallbackToKV: false, run: handleGetSettings },
+	'settings.save': { run: handleSaveSettings },
 	'secrets.list': { readOnly: true, run: (request, env) => handleGetSecrets(env, request) },
 	'secrets.add': { run: handleAddSecret },
 	'secrets.update': { run: handleUpdateSecret },
@@ -83,6 +92,8 @@ const detachedContext = {
 export class SecretsStore {
 	constructor(state, env) {
 		this.state = state;
+		this.themeEnv = env;
+		this.themeStore = null;
 		this.env = {
 			...env,
 			SECRETS_KV: createConsistentKV({
@@ -94,9 +105,15 @@ export class SecretsStore {
 			}),
 		};
 		this.enqueue = createSerialQueue();
+		this.enqueueSettingsSave = createSerialQueue();
+		this.lastSettingsSaveAt = null;
 	}
 
 	async fetch(request) {
+		if (request.headers.has(THEME_OPERATION_HEADER) && !request.headers.has(SECRETS_STORE_OPERATION_HEADER)) {
+			this.themeStore ||= new ThemeStore(this.state, this.themeEnv);
+			return this.themeStore.fetch(request);
+		}
 		const name = request.headers.get(SECRETS_STORE_OPERATION_HEADER);
 		const operation = Object.hasOwn(OPERATIONS, name) ? OPERATIONS[name] : null;
 		if (!operation) {
@@ -106,14 +123,40 @@ export class SecretsStore {
 		headers.delete(SECRETS_STORE_OPERATION_HEADER);
 		const body = request.method === 'GET' || request.method === 'HEAD' ? null : await request.arrayBuffer();
 		const forwarded = new Request(request.url, { method: request.method, headers, body });
-		return this.enqueue(async () => {
+		const run = () =>
+			this.enqueue(async () => {
+				try {
+					return await operation.run(forwarded, this.env, detachedContext);
+				} catch (error) {
+					getLogger(this.env).error('密钥存储协调服务处理请求失败', { operation: name, errorMessage: error.message }, error);
+					return createErrorResponse('服务器错误', '请求处理失败，请稍后重试', 500, forwarded);
+				}
+			});
+		if (name !== 'settings.save') {
+			return run();
+		}
+		// Space settings writes across tabs without holding up secret operations
+		// while waiting for Workers KV's per-key write interval.
+		return this.enqueueSettingsSave(async () => {
+			const delay = this.lastSettingsSaveAt === null ? 0 : this.lastSettingsSaveAt + SETTINGS_SAVE_INTERVAL - Date.now();
+			if (delay > 0) {
+				await new Promise((resolve) => setTimeout(resolve, delay));
+			}
 			try {
-				return await operation.run(forwarded, this.env, detachedContext);
-			} catch (error) {
-				getLogger(this.env).error('密钥存储协调服务处理请求失败', { operation: name, errorMessage: error.message }, error);
-				return createErrorResponse('服务器错误', '请求处理失败，请稍后重试', 500, forwarded);
+				return await run();
+			} finally {
+				this.lastSettingsSaveAt = Date.now();
 			}
 		});
+	}
+
+	async alarm() {
+		// A cold object can receive an alarm before fetch; only appearance:v1 owns
+		// this persisted marker. Secrets/settings instances have no theme jobs.
+		if (await this.state.storage.get(THEME_OWNER_KEY)) {
+			this.themeStore ||= new ThemeStore(this.state, this.themeEnv);
+			return this.themeStore.alarm();
+		}
 	}
 }
 
@@ -156,6 +199,7 @@ export async function runSecretsOperation(name, request, env, ctx) {
 	const body = request.method === 'GET' || request.method === 'HEAD' ? null : await request.arrayBuffer();
 	const createRequest = (extraHeaders = {}) => {
 		const headers = new Headers(request.headers);
+		headers.delete(THEME_OPERATION_HEADER);
 		for (const [key, value] of Object.entries(extraHeaders)) {
 			headers.set(key, value);
 		}
@@ -168,6 +212,9 @@ export async function runSecretsOperation(name, request, env, ctx) {
 		const logger = getLogger(env);
 		logger.error('无法连接密钥存储协调服务', { operation: name, errorMessage: error.message }, error);
 		if (operation.readOnly) {
+			if (operation.fallbackToKV === false) {
+				return createErrorResponse('获取设置失败', '读取设置时发生错误', 503, request);
+			}
 			// Reading KV directly can show an older list, but it cannot lose data.
 			return operation.run(createRequest(), env, ctx);
 		}
@@ -181,6 +228,14 @@ async function fetchInternal(env, operation) {
 		throw new Error(`HTTP ${response.status}`);
 	}
 	return response.json();
+}
+
+/** Settings for page rendering; a configured store must provide the current value. */
+export async function readSettingsSnapshot(env) {
+	if (!env.SECRETS_STORE) {
+		return getSettings(env);
+	}
+	return fetchInternal(env, 'settings.get');
 }
 
 /**

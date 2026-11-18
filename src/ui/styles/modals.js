@@ -2242,6 +2242,27 @@ export function getModalStyles() {
       line-height: 1.5;
     }
 
+    .settings-about-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .settings-about-credit a {
+      color: var(--text-link, var(--primary));
+    }
+
+    .settings-panel[data-panel="about"] a.btn {
+      display: inline-flex;
+      width: auto;
+      text-decoration: none;
+    }
+
+    #settingsAboutUpdate[hidden] {
+      display: none;
+    }
+
     .settings-divider {
       height: 1px;
       background: var(--border-primary);
@@ -2459,6 +2480,39 @@ export function getModalStyles() {
 
     .settings-result.error {
       color: var(--error-color, #f44336);
+    }
+
+    .settings-code-editor {
+      display: block;
+      width: 100%;
+      min-height: 260px;
+      box-sizing: border-box;
+      resize: vertical;
+      padding: 12px;
+      border: 1px solid var(--border-primary);
+      border-radius: var(--radius-sm);
+      background: var(--bg-secondary);
+      color: var(--text-primary);
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      tab-size: 2;
+    }
+
+    .settings-code-editor:focus {
+      outline: 2px solid var(--accent-color, #2196F3);
+      outline-offset: 1px;
+    }
+
+    .settings-code-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .settings-code-actions [hidden] {
+      display: none;
     }
 
     /* ========== P1.1 手机端 Bottom Sheet ========== */

@@ -5,8 +5,9 @@
 
 // API 处理器
 import { handleGenerateOTP, handleGetBackups, handleExportBackup, handleExportSecrets } from '../api/secrets/index.js';
-import { runSecretsOperation } from '../storage/secrets-store.js';
+import { readSettingsSnapshot, runSecretsOperation } from '../storage/secrets-store.js';
 import { handleFaviconProxy } from '../api/favicon.js';
+import { isAppearanceSafeMode } from '../ui/publicAppearance.js';
 import {
 	handleGetWebDAVConfigs,
 	handleSaveWebDAVConfig,
@@ -32,7 +33,6 @@ import {
 	handleToggleGoogleDrive,
 } from '../api/gdrive.js';
 import { handleChangePassword } from '../api/password.js';
-import { handleGetSettings, handleSaveSettings } from '../api/settings.js';
 import { handleGetTime } from '../api/time.js';
 
 // UI 页面生成器
@@ -41,6 +41,8 @@ import { createSetupPage } from '../ui/setupPage.js';
 import { createManifest, createDefaultIcon } from '../ui/manifest.js';
 import { createServiceWorker } from '../ui/serviceworker.js';
 import { getModuleCode } from '../ui/scripts/index.js';
+import { createRuntimeManifest } from '../ui/runtimeManifest.js';
+import { createQrVendorResponse } from '../ui/qrVendors.js';
 
 // 工具函数
 import { createErrorResponse } from '../utils/response.js';
@@ -56,6 +58,15 @@ import {
 } from '../utils/auth.js';
 import { createPreflightResponse } from '../utils/security.js';
 import { getLogger } from '../utils/logger.js';
+import {
+	handleThemeRequest,
+	handleThemeAssetRequest,
+	handleThemePreviewRequest,
+	revokeThemePreviewOwner,
+	getPublicAppearance,
+	createDefaultAppearance,
+} from '../api/themes.js';
+import { getBuildId } from '../utils/build.js';
 
 /**
  * 处理HTTP请求的主要函数
@@ -71,6 +82,25 @@ export async function handleRequest(request, env, ctx) {
 	const logger = getLogger(env);
 
 	try {
+		if (pathname.startsWith('/vendor/')) {
+			return createQrVendorResponse(request);
+		}
+		if (pathname.startsWith('/theme-preview/')) {
+			return handleThemePreviewRequest(request, env);
+		}
+		if (pathname.startsWith('/theme-assets/') || pathname.startsWith('/theme-packages/')) {
+			return handleThemeAssetRequest(request, env);
+		}
+		if (pathname === '/api/runtime-manifest' && url.searchParams.get('mode') === 'safe') {
+			const buildId = getBuildId();
+			if (method !== 'GET') {
+				return new Response('Not found', { status: 404 });
+			}
+			if (!buildId || url.searchParams.get('build') !== buildId || url.searchParams.get('appearance') !== '0') {
+				return createErrorResponse('应用版本已更新', '请刷新页面后重试', 409, request);
+			}
+			return createRuntimeManifest(request, { appearance: null, buildId, customCodes: [] });
+		}
 		// 时间校准接口必须在设置和认证检查前处理，确保无需访问 KV。
 		if (pathname === '/api/time') {
 			if (method === 'GET') {
@@ -83,13 +113,14 @@ export async function handleRequest(request, env, ctx) {
 
 		// 🔧 首次设置路由（不需要认证）
 		if (pathname === '/setup') {
+			const safeMode = isAppearanceSafeMode(request);
 			// 检查是否需要首次设置
 			const setupRequired = await checkIfSetupRequired(env);
 			if (!setupRequired) {
 				// 已完成设置，重定向到首页
-				return Response.redirect(new URL('/', request.url).toString(), 302);
+				return Response.redirect(new URL(safeMode ? '/?safeMode=1' : '/', request.url).toString(), 302);
 			}
-			return await createSetupPage(request);
+			return await createSetupPage(request, getBuildId() && !safeMode ? await getPublicAppearance(env) : null);
 		}
 
 		// 🔧 首次设置 API（不需要认证）
@@ -101,7 +132,7 @@ export async function handleRequest(request, env, ctx) {
 		const setupRequired = await checkIfSetupRequired(env);
 		if (setupRequired && pathname === '/') {
 			// 需要首次设置，重定向到设置页面
-			return Response.redirect(new URL('/setup', request.url).toString(), 302);
+			return Response.redirect(new URL(isAppearanceSafeMode(request) ? '/setup?safeMode=1' : '/setup', request.url).toString(), 302);
 		}
 
 		// 🔐 检查是否需要身份验证（使用详细验证以支持自动续期）
@@ -132,14 +163,65 @@ export async function handleRequest(request, env, ctx) {
 			request.authDetails = authDetails;
 		}
 
+		if (
+			pathname === '/api/themes' ||
+			pathname.startsWith('/api/themes/') ||
+			pathname === '/api/appearance' ||
+			pathname.startsWith('/api/appearance/')
+		) {
+			if (!getBuildId() && !['GET', 'HEAD'].includes(method)) {
+				return createErrorResponse('需要构建应用', '请通过 npm run dev 或 npm run deploy 启用主题发布。', 503, request);
+			}
+			return handleThemeRequest(request, env, ctx);
+		}
+		if (pathname === '/api/runtime-manifest' && method === 'GET') {
+			const buildId = getBuildId();
+			if (!buildId || url.searchParams.get('build') !== buildId) {
+				return createErrorResponse('应用版本已更新', '请刷新页面后重试', 409, request);
+			}
+			const saved = await handleThemeRequest(new Request(new URL('/api/appearance', request.url)), env);
+			if (!saved.ok) {
+				return saved;
+			}
+			const { active: appearance } = await saved.json();
+			const mode = appearance?.kind === 'app' ? 'app' : 'official';
+			if (url.searchParams.get('appearance') !== String(appearance.revision) || url.searchParams.get('mode') !== mode) {
+				return createErrorResponse('外观已更新', '请重新加载已保存外观后重试', 409, request);
+			}
+			let customCodes = [];
+			try {
+				customCodes = (await readSettingsSnapshot(env)).customCodes;
+			} catch (error) {
+				logger.warn('读取自定义代码失败，使用默认页面', { errorMessage: error.message });
+			}
+			return createRuntimeManifest(request, { appearance, buildId, customCodes });
+		}
+
 		// 静态路由处理
 		if (pathname === '/' || pathname === '') {
-			return await createMainPage();
+			const buildId = getBuildId();
+			const safeMode = url.searchParams.get('safeMode') === '1' || url.searchParams.get('disableCustomCode') === '1';
+			const readCustomCodes = async () => {
+				try {
+					return (await readSettingsSnapshot(env)).customCodes;
+				} catch (error) {
+					logger.warn('读取自定义代码失败，使用默认页面', { errorMessage: error.message });
+					return [];
+				}
+			};
+			// These independent inputs keep their own fallbacks. Recovery must not
+			// start either read, even if saved code or appearance storage is broken.
+			const [customCodes, appearance] = safeMode
+				? [[], null]
+				: await Promise.all([readCustomCodes(), buildId ? getPublicAppearance(env) : null]);
+			return await createMainPage({ customCodes, appearance, buildId, safeMode, lazyLoad: Boolean(buildId) });
 		}
 
 		// PWA Manifest
 		if (pathname === '/manifest.json') {
-			return createManifest(request);
+			const safeMode = url.searchParams.get('safeMode') === '1' || url.searchParams.get('disableCustomCode') === '1';
+			const appearance = getBuildId() && !safeMode ? await getPublicAppearance(env) : createDefaultAppearance();
+			return createManifest(request, appearance);
 		}
 
 		// Service Worker
@@ -161,10 +243,17 @@ export async function handleRequest(request, env, ctx) {
 		// 懒加载模块路由（需要认证）
 		if (pathname.startsWith('/modules/')) {
 			const moduleName = pathname.substring(9).replace('.js', ''); // 去掉 '/modules/' 和 '.js'
-			const allowedModules = ['import', 'export', 'backup', 'qrcode', 'tools', 'googleMigration'];
+			const allowedModules = ['import', 'export', 'backup', 'qrcode', 'tools', 'googleMigration', 'appearance'];
 
 			if (!allowedModules.includes(moduleName)) {
 				return createErrorResponse('模块未找到', `不存在的模块: ${moduleName}`, 404, request);
+			}
+			const buildId = getBuildId();
+			if (!buildId || url.searchParams.get('build') !== buildId) {
+				const response = createErrorResponse('应用版本已更新', '请保留未保存内容，刷新页面后再使用此功能。', 409, request);
+				response.headers.set('Cache-Control', 'no-store');
+				response.headers.set('X-2FA-Build', buildId);
+				return response;
 			}
 
 			try {
@@ -177,6 +266,7 @@ export async function handleRequest(request, env, ctx) {
 				return new Response(moduleCode, {
 					headers: {
 						'Content-Type': 'application/javascript; charset=utf-8',
+						'X-2FA-Build': buildId,
 						'Cache-Control': isProd ? 'public, max-age=3600' : 'no-cache, no-store, must-revalidate',
 						'Access-Control-Allow-Origin': '*',
 					},
@@ -194,7 +284,16 @@ export async function handleRequest(request, env, ctx) {
 
 		// 退出登录路由
 		if (pathname === '/api/logout' && method === 'POST') {
-			return await handleLogout(request, env);
+			const response = await handleLogout(request, env);
+			if (response.ok) {
+				try {
+					request.authDetails = await verifyAuthWithDetails(request, env);
+					await revokeThemePreviewOwner(request, env);
+				} catch {
+					logger.warn('退出登录后主题预览撤销暂时不可用，将在固定期限内过期');
+				}
+			}
+			return response;
 		}
 
 		// Token 刷新路由
@@ -225,7 +324,7 @@ export async function handleRequest(request, env, ctx) {
 		// OTP生成路由（支持高级参数）
 		// 处理 /otp（显示使用说明）
 		if (pathname === '/otp') {
-			return await handleGenerateOTP('', request);
+			return await handleGenerateOTP('', request, env);
 		}
 
 		// 处理 /otp/{secret}（生成OTP）
@@ -237,7 +336,7 @@ export async function handleRequest(request, env, ctx) {
 			} catch {
 				secret = pathname.substring(5); // 解码失败则用原值，由后续 validateBase32 报错
 			}
-			return await handleGenerateOTP(secret, request);
+			return await handleGenerateOTP(secret, request, env);
 		}
 
 		// 404处理
@@ -370,9 +469,9 @@ async function handleApiRequest(pathname, method, request, env, ctx) {
 	if (pathname === '/api/settings') {
 		switch (method) {
 			case 'GET':
-				return handleGetSettings(request, env);
+				return runSecretsOperation('settings.get', request, env, ctx);
 			case 'POST':
-				return handleSaveSettings(request, env);
+				return runSecretsOperation('settings.save', request, env, ctx);
 			default:
 				return createErrorResponse('方法不允许', `不支持的HTTP方法: ${method}`, 405, request);
 		}

@@ -4,7 +4,15 @@
  */
 
 import { createOfflinePage } from './offlinePage.js';
+import { getBuildId } from '../utils/build.js';
+import { createSnapshotIndex, createSnapshotManager } from './offlineSnapshots.js';
+import { createRuntimeProtocol } from './runtimeProtocol.js';
+import { createRuntimeSnapshotIndex } from './runtimeSnapshotIndex.js';
+import { createRuntimeSnapshotManager } from './runtimeSnapshots.js';
+import { serializeBrowserFunction } from './scripts/browserSource.js';
 import { OFFLINE_MESSAGES } from './locales/offline.js';
+import { getQrVendorInventory } from './qrVendors.js';
+import { SUPPORTED_LANGUAGES } from '../shared/languages.js';
 import { normalizeLanguage } from '../shared/languages.js';
 
 /**
@@ -19,7 +27,7 @@ export function createServiceWorker(env = {}) {
 	// 2. env.BUILD_TIMESTAMP - 构建时间戳
 	// 3. __BUILD_SW_VERSION__ - 单文件 release 构建时内嵌的版本号
 	// 4. 'v1' - 默认版本（后备）
-	const version = env.SW_VERSION || env.BUILD_TIMESTAMP || embeddedBuildVersion || 'v1';
+	const version = getBuildId() || env.SW_VERSION || env.BUILD_TIMESTAMP || embeddedBuildVersion || 'v1';
 
 	// 生成缓存名称
 	const CACHE_NAME = `2fa-cache-${version}`;
@@ -39,13 +47,27 @@ export function createServiceWorker(env = {}) {
 
 const CACHE_NAME = '${CACHE_NAME}';
 const RUNTIME_CACHE = '${RUNTIME_CACHE}';
+const BUILD_ID = ${JSON.stringify(getBuildId())};
+const snapshotManager = BUILD_ID ? (${serializeBrowserFunction(createSnapshotManager)})({
+  buildId: BUILD_ID, origin: self.location.origin, caches, fetch,
+  index: (${serializeBrowserFunction(createSnapshotIndex)})(), clients: self.clients,
+  canClean: async () => !runtimeSnapshots || runtimeSnapshots.canCleanLegacy()
+}) : null;
+const runtimeProtocol = BUILD_ID ? (${serializeBrowserFunction(createRuntimeProtocol)})({origin: self.location.origin,languages:${JSON.stringify(SUPPORTED_LANGUAGES)}}) : null;
+const runtimeSnapshots = BUILD_ID ? (${serializeBrowserFunction(createRuntimeSnapshotManager)})({
+  buildId: BUILD_ID, origin: self.location.origin, caches, fetch,
+  index: (${serializeBrowserFunction(createRuntimeSnapshotIndex)})(), protocol: runtimeProtocol,
+  clients: self.clients,
+  notify: message => { void notifyClients({...message,type:'RUNTIME_STATUS_CHANGED'}).catch(() => {}); }
+}) : null;
+const QR_VENDORS = ${JSON.stringify(getQrVendorInventory())};
 const DB_NAME = '2fa-offline-db';
 const DB_VERSION = 1;
 const SW_VERSION = '${version}';
 const STORE_NAME = 'pending-operations';
 const OFFLINE_PAGE = ${JSON.stringify(createOfflinePage())};
 const OFFLINE_MESSAGES = ${JSON.stringify(OFFLINE_MESSAGES)};
-const offlineLanguage = ${normalizeLanguage.toString()};
+const offlineLanguage = ${serializeBrowserFunction(normalizeLanguage)};
 function offlineRequestLanguage(request) {
   const explicit = request.headers.get('X-Language');
   if (typeof explicit === 'string') return offlineLanguage(explicit) || 'en';
@@ -283,55 +305,86 @@ async function updateOperation(operationId, updates, condition = null) {
  * 预缓存静态资源
  */
 self.addEventListener('install', event => {
-  console.log('[SW] 正在安装 Service Worker...');
-  
-  event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => {
-      console.log('[SW] 预缓存静态资源...');
-      // 只缓存静态资源，CDN 资源在首次请求时按需缓存
-      return cache.addAll(STATIC_RESOURCES).catch(err => {
-        console.warn('[SW] 预缓存静态资源部分失败:', err);
-        // 即使失败也继续，不影响 Service Worker 安装
-        return Promise.resolve();
-      });
-    }).then(() => {
-      console.log('[SW] Service Worker 安装完成');
-      console.log('[SW] CDN 资源将在首次请求时自动缓存（使用 CORS 模式）');
-      // 立即激活，不等待
-      return self.skipWaiting();
-    }).catch(err => {
-      console.error('[SW] Service Worker 安装失败:', err);
-    })
-  );
+  // Versioned snapshots are staged by authenticated pages. Install never
+  // replaces a working shell with a partial preload or a login redirect.
+  event.waitUntil((async () => {
+    if (!snapshotManager) {
+      const cache = await caches.open(CACHE_NAME);
+      await cache.addAll(STATIC_RESOURCES).catch(() => {});
+    }
+    // Legacy upgrades wait naturally; protocol updates use one gated coordinator.
+  })());
 });
 
-/**
- * Service Worker 激活事件
- * 清理旧缓存
- */
 self.addEventListener('activate', event => {
-  console.log('[SW] 正在激活 Service Worker...');
-  
-  event.waitUntil(
-    caches.keys().then(cacheNames => {
-      return Promise.all(
-        cacheNames
-          .filter(cacheName => {
-            // 删除旧版本缓存
-            return cacheName !== CACHE_NAME && cacheName !== RUNTIME_CACHE;
-          })
-          .map(cacheName => {
-            console.log('[SW] 删除旧缓存:', cacheName);
-            return caches.delete(cacheName);
-          })
-      );
-    }).then(() => {
-      console.log('[SW] Service Worker 激活完成');
-      // 立即控制所有页面
-      return self.clients.claim();
-    })
-  );
+  // Keep legacy and last-good caches until a complete candidate is promoted.
+  event.waitUntil(runtimeSnapshots ? runtimeSnapshots.recordWorker() : Promise.resolve());
 });
+
+// A fresh launch (not a reload) opens the stored page at once and checks the server copy in
+// the background; a newer one makes the page reload, and reloads stay network-first. Build and
+// shell config (appearance and custom code) identify the page completely.
+const SHELL_IDENTITY = ['X-2FA-Build', 'X-2FA-Shell-Config'];
+const shellIdentity = response => SHELL_IDENTITY.map(name => response?.headers?.get(name) || '');
+const sameShell = (a, b) => {
+  const left = shellIdentity(a), right = shellIdentity(b);
+  return left.every(Boolean) && left.every((value, index) => value === right[index]);
+};
+// The newer page a background check found; a launch soon after uses it instead of the stored one.
+let latestShell = null;
+// Set by a page about to reload for another saved appearance: the stored page shows the old one,
+// so that navigation waits for the server instead of falling back after the short deadline.
+let freshShellUntil = 0;
+async function launchFromCache(event, request, url, storedLookup) {
+  const clientId = event.resultingClientId || event.clientId;
+  if (request.mode !== 'navigate' || ['no-cache', 'reload', 'no-store'].includes(request.cache) || url.search || !clientId) return null;
+  if (latestShell && latestShell.href === request.url && Date.now() - latestShell.at < 60000) {
+    const response = latestShell.response.clone();
+    if (runtimeSnapshots) await runtimeSnapshots.pinNavigation(request, clientId, response.clone()).catch(() => {});
+    return response;
+  }
+  const lookup = async (id) => (runtimeSnapshots ? await runtimeSnapshots.matchNavigation(request, id).catch(() => null) : null) ||
+    (snapshotManager ? await snapshotManager.match(request, id).catch(() => null) : null);
+  // A slow store must not hold up the network path, which only starts after this.
+  const quick = promise => Promise.race([promise, new Promise(resolve => setTimeout(() => resolve(null), 300))]);
+  // A stored page that cannot prove its identity (an older format) is never served first.
+  const candidate = await quick(storedLookup);
+  if (!candidate || candidate.status !== 200 || !shellIdentity(candidate).every(Boolean)) return null;
+  const served = await quick(lookup(clientId));
+  if (!served || !sameShell(served, candidate)) return null;
+  event.waitUntil(revalidateShell(request, served, clientId));
+  return served;
+}
+async function revalidateShell(request, served, clientId) {
+  let stale = false;
+  try {
+    const response = await fetch(new Request(request.url, {
+      method: 'GET', headers: request.headers, credentials: request.credentials, mode: 'same-origin',
+      redirect: 'follow', cache: 'no-store', referrer: request.referrer, referrerPolicy: request.referrerPolicy
+    }));
+    // Outages keep the stored page, exactly like an offline launch.
+    if (response.status >= 500) return;
+    if (response.status !== 200 || response.redirected) stale = true;
+    else {
+      const complete = new Response(await response.arrayBuffer(), { status: 200, statusText: response.statusText, headers: response.headers });
+      if (!sameShell(served, complete)) {
+        stale = true;
+        latestShell = { href: request.url, response: complete, at: Date.now() };
+      }
+    }
+  } catch {
+    return;
+  }
+  if (!stale) return;
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const client = await Promise.resolve().then(() => self.clients.get(clientId)).catch(() => null);
+    if (client) {
+      client.postMessage({ type: 'SHELL_STALE' });
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+}
 
 /**
  * Service Worker Fetch 事件
@@ -508,13 +561,42 @@ self.addEventListener('fetch', event => {
   // an already-cached app from opening. This never applies to account writes.
   if (url.origin === self.location.origin && request.method === 'GET' && url.pathname === '/') {
     let cacheUpdate = Promise.resolve();
+    let cacheLookup = Promise.resolve(null);
+    const expectFresh = request.mode === 'navigate' && Date.now() < freshShellUntil;
+    if (expectFresh) {
+      freshShellUntil = 0;
+      latestShell = null;
+    }
     const navigation = (async () => {
-      const cached = await caches.match(request).catch(() => null);
+      // Inspect the offline candidate without delaying the online request.
+      // This lookup has no clientId and cannot bind a shell to this navigation.
+      cacheLookup = (async () => (runtimeSnapshots ? await runtimeSnapshots.matchNavigation(request).catch(() => null) : null) || await (snapshotManager ? snapshotManager.match(request) : caches.match(request)).catch(() => null))();
+      const launched = expectFresh ? null : await launchFromCache(event, request, url, cacheLookup).catch(() => null);
+      if (launched) return launched;
+      const startedAt = Date.now();
       const controller = new AbortController();
       let timer;
+      let decided = false;
       try {
+        const deadline = new Promise((_, reject) => {
+          const expire = () => { controller.abort(); reject(new Error('首页加载超时')); };
+          timer = setTimeout(expire, 8000);
+          void cacheLookup.then(cached => {
+            if (!cached || decided || expectFresh) return;
+            clearTimeout(timer);
+            timer = setTimeout(expire, Math.max(0, 1500 - (Date.now() - startedAt)));
+          });
+        });
         const network = (async () => {
-          const response = await fetch(request, { redirect: 'follow', signal: controller.signal });
+          // Buffer navigation HTML through an ordinary same-origin request,
+          // without carrying navigation-only destination/mode semantics.
+          // Keep the original request for cache keys and client pinning below.
+          const networkRequest = request.mode === 'navigate' ? new Request(request.url, {
+            method: request.method, headers: request.headers, credentials: request.credentials,
+            cache: request.cache, referrer: request.referrer, referrerPolicy: request.referrerPolicy,
+            mode: 'same-origin', redirect: 'follow', signal: controller.signal
+          }) : request;
+          const response = await fetch(networkRequest, { redirect: 'follow', signal: controller.signal });
           if (!response || response.status >= 500) throw new Error('首页暂时无法连接');
           // An explicit authorization denial must never be replaced by an old
           // shell, even if its error response body is incomplete.
@@ -524,31 +606,39 @@ self.addEventListener('fetch', event => {
           const complete = new Response([204, 205, 304].includes(response.status) ? null : body, {
             status: response.status, statusText: response.statusText, headers: response.headers
           });
-          if (response.status === 200) {
+          if (response.status === 200 && !snapshotManager) {
             const responseToCache = complete.clone();
             cacheUpdate = caches.open(CACHE_NAME)
               .then(cache => cache.put(request, responseToCache))
               .catch(error => console.warn('[SW] 无法更新首页缓存:', error));
           }
+          if (runtimeSnapshots) await runtimeSnapshots.pinNavigation(request, event.resultingClientId || event.clientId, complete,
+            {isCurrent:()=>!controller.signal.aborted}).catch(() => {});
           return complete;
         })();
-        return await Promise.race([
-          network,
-          new Promise((_, reject) => {
-            timer = setTimeout(() => { controller.abort(); reject(new Error('首页加载超时')); }, cached ? 1500 : 8000);
-          })
-        ]);
+        return await Promise.race([network, deadline]);
       } catch {
-        return cached || new Response(OFFLINE_PAGE, {
+        // No late body/pin or late speculative lookup may affect the chosen
+        // fallback. Revalidate and pin only the complete shell actually served.
+        decided = true;
+        controller.abort();
+        clearTimeout(timer);
+        // Bind only the shell actually served offline, not the speculative
+        // cached lookup made before a successful network navigation.
+        const fallback = (runtimeSnapshots ? await runtimeSnapshots.matchNavigation(request, event.resultingClientId || event.clientId).catch(() => null) : null) || (snapshotManager
+          ? await snapshotManager.match(request, event.resultingClientId || event.clientId).catch(() => null)
+          : await cacheLookup);
+        return fallback || new Response(OFFLINE_PAGE, {
           status: 503, statusText: 'Service Unavailable',
           headers: { 'Content-Type': 'text/html; charset=utf-8' }
         });
       } finally {
+        decided = true;
         clearTimeout(timer);
       }
     })();
     event.respondWith(navigation);
-    event.waitUntil(navigation.then(() => cacheUpdate));
+    event.waitUntil(Promise.all([navigation.then(() => cacheUpdate), cacheLookup]));
     return;
   }
 
@@ -619,36 +709,107 @@ self.addEventListener('fetch', event => {
     return;
   }
   
-  // 按需加载的功能模块（导入、导出、扫码、备份等）：网络优先，联网时存一份，
-  // 离线时用当前版本存下的副本，新版本激活时随旧缓存一起删除。
-  // 写缓存交给 waitUntil，响应结束后 Service Worker 不会在写完前被回收
+  if (request.method === 'GET' && (url.pathname.startsWith('/theme-packages/') || url.pathname.startsWith('/vendor/'))) {
+    event.respondWith((async () => {
+      const kept = runtimeSnapshots ? await runtimeSnapshots.fetchResource(request, event.clientId).catch(() => null) : null;
+      if (kept) return kept;
+      const vendor = QR_VENDORS.find(item => item.url === url.pathname && !url.search);
+      if (!vendor) { try { return await fetch(request); } catch { return new Response('', {status:503}); } }
+      const cache = await caches.open('2fa-vendor-cache-v1');
+      const cached = await cache.match(request);
+      const valid = async response => {
+        if (!response || !response.ok || (response.headers.get('Content-Type') || '').split(';')[0] !== vendor.mime) return false;
+        const bytes = await response.clone().arrayBuffer();
+        const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),byte=>byte.toString(16).padStart(2,'0')).join('');
+        return bytes.byteLength === vendor.size && hash === vendor.sha256;
+      };
+      try {
+        const response = await fetch(request);
+        if (response.status === 401 || response.status === 403) return response;
+        if (await valid(response)) { await cache.put(request,response.clone()); return response; }
+        if (response.status >= 500 && await valid(cached)) return cached;
+        return response;
+      } catch { return await valid(cached) ? cached : new Response('',{status:503}); }
+    })());
+    return;
+  }
+
+  // The request build selects its cache, including old pages controlled by a new SW.
   if (url.pathname.startsWith('/modules/') && request.method === 'GET') {
+    const requestedBuild = url.searchParams.get('build');
+    const identified = /^[a-f0-9]{64}$/.test(requestedBuild || '');
+    const cacheName = identified ? '2fa-modules-' + requestedBuild : RUNTIME_CACHE;
     let cacheWrite = Promise.resolve();
-    const moduleResponse = fetch(request).then(response => {
-      if (response.ok) {
-        const responseToCache = response.clone();
-        cacheWrite = caches.open(RUNTIME_CACHE)
-          .then(cache => cache.put(request, responseToCache))
-          .catch(error => console.warn('[SW] 无法缓存功能模块:', url.pathname, error));
+    const keptModule = async () => {
+      if (!identified && BUILD_ID) {
+        // A pre-upgrade page only gets an exact legacy-cache entry.
+        for (const name of await caches.keys()) {
+          if (name.startsWith('2fa-runtime-') && !/[a-f0-9]{64}$/.test(name)) {
+            const cached = await (await caches.open(name)).match(request);
+            if (cached) return cached;
+          }
+        }
+        return null;
       }
-      return response;
-    }).catch(err => caches.match(request).then(cached => {
-      if (cached) return cached;
-      console.error('[SW] 功能模块加载失败:', url.pathname, err);
-      return new Response(offlineText('resourceUnavailable', language), {
-        status: 503,
-        statusText: 'Service Unavailable',
-        headers: { 'Content-Type': 'text/plain; charset=utf-8' }
-      });
-    }));
+      return identified ? (await caches.open(cacheName)).match(request) : caches.match(request);
+    };
+    const moduleResponse = (async () => {
+      const runtimeResource = runtimeSnapshots ? await runtimeSnapshots.fetchResource(request, event.clientId).catch(() => null) : null;
+      if (runtimeResource) return runtimeResource;
+      try {
+        const response = await fetch(request);
+        if (response.status === 401 || response.status === 403) return response;
+        if (identified && response.ok && response.headers.get('X-2FA-Build') !== requestedBuild) {
+          return (await keptModule()) || new Response('Module build changed; refresh the page', { status: 409 });
+        }
+        if (response.status === 409 || response.status >= 500) return (await keptModule()) || response;
+        if (response.ok && (identified || !BUILD_ID)) {
+          const copy = response.clone();
+          cacheWrite = caches.open(cacheName).then(cache => cache.put(request, copy)).catch(() => {});
+        }
+        // Missing identity must never execute current code in a legacy page.
+        if (!identified && BUILD_ID && response.ok) {
+          return (await keptModule()) || new Response('Refresh required', { status: 409 });
+        }
+        return response;
+      } catch {
+        return (await keptModule()) || new Response(offlineText('resourceUnavailable', language), {
+          status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+        });
+      }
+    })();
     event.respondWith(moduleResponse);
     event.waitUntil(moduleResponse.catch(() => {}).then(() => cacheWrite));
     return;
   }
 
+  if (snapshotManager && request.method === 'GET' &&
+      (url.pathname.startsWith('/theme-assets/') || url.pathname === '/manifest.json' || url.pathname.startsWith('/icon-') || url.pathname.startsWith('/apple-touch-icon'))) {
+    event.respondWith((async () => {
+      const runtimeResource = runtimeSnapshots ? await runtimeSnapshots.fetchResource(request, event.clientId).catch(() => null) : null;
+      if (runtimeResource) return runtimeResource;
+      const bound = await snapshotManager.boundResource(request, event.clientId).catch(() => null);
+      if (bound) return bound;
+        try {
+          const response = await fetch(request);
+          if (response.status >= 500) {
+            return (await snapshotManager.match(request, event.clientId)) || response;
+          }
+          return response;
+        } catch {
+          return (await snapshotManager.match(request, event.clientId)) || new Response('', { status: 503 });
+        }
+    })());
+    return;
+  }
+
   // 其他请求：网络优先
   event.respondWith(
-    fetch(request, { redirect: 'follow' }).catch(err => {
+    // Let the browser follow navigation redirects: a followed response cannot
+    // satisfy a navigation whose original redirect policy is manual.
+    (url.origin === self.location.origin && request.method === 'GET' && request.mode === 'navigate'
+      ? fetch(request)
+      : fetch(request, { redirect: 'follow' })).catch(err => {
       console.error('[SW] 请求失败:', url.pathname, err);
       // 返回离线页面或错误信息
       return new Response(offlineText('resourceUnavailable', language), {
@@ -1200,7 +1361,95 @@ function isQueueClient(event) {
  * 消息处理
  * 允许页面与 Service Worker 通信
  */
+async function activeRuntimeBuild() {
+  const active = self.registration?.active;
+  if (!active || typeof MessageChannel !== 'function') return null;
+  return new Promise(resolve => {
+    const channel = new MessageChannel();
+    const nonce = crypto.randomUUID();
+    const timer = setTimeout(() => finish(null), 3000);
+    function finish(value) { clearTimeout(timer); channel.port1.close(); channel.port2.close(); resolve(value); }
+    channel.port1.onmessage = event => {
+      if (self.registration.active !== active || event.data?.protocol !== '2fa-runtime-v1' || event.data.nonce !== nonce) return;
+      finish(event.data.workerBuild);
+    };
+    try { active.postMessage({type:'RUNTIME_PROTOCOL_INFO',nonce},[channel.port2]); } catch { finish(null); }
+  });
+}
+// A worker from before the runtime protocol cannot hand its pages over. It is replaced only while
+// the asking page is the only one open, and that page reloads right after.
+async function onlyWindow(clientId) {
+  const windows = await self.clients.matchAll({type:'window',includeUncontrolled:true});
+  return windows.length === 1 && windows[0].id === clientId;
+}
+async function handleRuntimeRequest(event, type = event.data?.type) {
+  const request = event.data || {};
+  const echo = {protocol:'2fa-runtime-v1',nonce:request.nonce,generation:request.generation,tuple:request.tuple,workerBuild:BUILD_ID};
+  try {
+    if (!isQueueClient(event) || !runtimeSnapshots || request.protocol !== '2fa-runtime-v1' ||
+        typeof request.nonce !== 'string' || request.nonce.length < 8 || !Number.isSafeInteger(request.generation)) throw new Error('invalid-runtime-client');
+    let result;
+    if (type === 'RUNTIME_PREPARE') result = await runtimeSnapshots.prepare(request.tuple,event.source.id,request);
+    else if (type === 'RUNTIME_ATTACH') result = await runtimeSnapshots.attach(request.tuple,event.source.id,request);
+    else if (type === 'RUNTIME_STATUS') result = await runtimeSnapshots.status(request.tuple,request);
+    else if (type === 'RUNTIME_STARTED') result = await runtimeSnapshots.markStartup(request.tuple,event.source.id,request);
+    else if (type === 'RUNTIME_ACTIVATE') {
+      const activeWorkerBuild = await activeRuntimeBuild();
+      if (!self.registration?.active || activeWorkerBuild === BUILD_ID) result = {status:'blocked',reason:'legacy-or-current-worker'};
+      else if (!activeWorkerBuild && !(await onlyWindow(event.source.id))) result = {status:'blocked',reason:'other-pages-open'};
+      else {
+        // Preparing first also keeps an offline page on the worker it has.
+        const prepared = await runtimeSnapshots.prepareServerRuntime(event.source.id);
+        if (prepared.status !== 'ready') result = prepared;
+        else if (activeWorkerBuild) result = await runtimeSnapshots.activation({activeWorkerBuild,skipWaiting:()=>self.skipWaiting()});
+        // Another page may have opened during the download.
+        else if (!(await onlyWindow(event.source.id))) result = {status:'blocked',reason:'other-pages-open'};
+        else {
+          await self.skipWaiting();
+          result = {status:'ready',reason:'activation-requested'};
+        }
+      }
+    }
+    else throw new Error('unknown-runtime-request');
+    event.ports?.[0]?.postMessage({...echo,...result});
+    // Each theme switch prepares a new complete snapshot; drop the ones no page or fallback still needs.
+    if (type === 'RUNTIME_STARTED' && result.status === 'ready') await runtimeSnapshots.clean().catch(() => {});
+  } catch (error) {
+    event.ports?.[0]?.postMessage({...echo,status:'blocked',reason:error.message,compatible:false,resourcesReady:false,recoveryReady:false});
+  }
+}
+
 self.addEventListener('message', event => {
+  if (event.data?.type === 'EXPECT_FRESH_SHELL') {
+    if (isQueueClient(event)) freshShellUntil = Date.now() + 30000;
+    event.ports?.[0]?.postMessage({ ok: true });
+    return;
+  }
+  if (event.data?.type === 'RUNTIME_PROTOCOL_INFO') {
+    event.ports?.[0]?.postMessage({protocol:'2fa-runtime-v1',nonce:event.data.nonce,workerBuild:BUILD_ID});
+    return;
+  }
+  if (['RUNTIME_PREPARE','RUNTIME_ATTACH','RUNTIME_STATUS','RUNTIME_STARTED','RUNTIME_ACTIVATE'].includes(event.data?.type)) {
+    event.waitUntil(handleRuntimeRequest(event));
+    return;
+  }
+
+  if (snapshotManager && (event.data?.type === 'APPEARANCE_SNAPSHOT' || event.data?.type === 'APP_BUILD_PIN')) {
+    const task = (async () => {
+      if (!isQueueClient(event)) throw new Error('Invalid snapshot client');
+      await snapshotManager.pin(event.source?.id, event.data.buildId, event.data.appearance?.revision ?? event.data.revision);
+      const result = event.data.type === 'APPEARANCE_SNAPSHOT'
+        ? await snapshotManager.stage(event.data.appearance, event.data.buildId)
+        : { ready: false, reason: 'pinned' };
+      event.ports?.[0]?.postMessage({ ok: true, ...result });
+    })().catch(error => {
+      console.warn('[SW] Keeping previous appearance snapshot:', error);
+      event.ports?.[0]?.postMessage({ ok: false, ready: false });
+    });
+    event.waitUntil(task);
+    return;
+  }
+
   console.log('[SW] 收到消息:', event.data);
   if (['OFFLINE_QUEUE_STATUS', 'OFFLINE_QUEUE_DETAIL', 'OFFLINE_QUEUE_RESUME', 'OFFLINE_QUEUE_RETRY', 'OFFLINE_QUEUE_CANCEL',
     'OFFLINE_QUEUE_CLAIM', 'OFFLINE_QUEUE_RELEASE'].includes(event.data?.type)) {
@@ -1222,25 +1471,19 @@ self.addEventListener('message', event => {
   }
   
   if (event.data && event.data.type === 'SKIP_WAITING') {
-    self.skipWaiting();
+    event.waitUntil(handleRuntimeRequest(event, 'RUNTIME_ACTIVATE'));
+    return;
   }
-  
+
   if (event.data && event.data.type === 'CLEAR_CACHE') {
-    event.waitUntil(
-      caches.keys().then(cacheNames => {
-        return Promise.all(
-          cacheNames.map(cacheName => {
-            console.log('[SW] 清除缓存:', cacheName);
-            return caches.delete(cacheName);
-          })
-        );
-      }).then(() => {
-        console.log('[SW] 所有缓存已清除');
-        event.ports[0].postMessage({ success: true });
-      })
-    );
+    event.waitUntil((async () => {
+      const result = isQueueClient(event) && runtimeSnapshots ? await runtimeSnapshots.clean() : {status:'blocked',reason:'runtime-unavailable'};
+      if (result.status === 'ready' && snapshotManager) await snapshotManager.clean();
+      event.ports?.[0]?.postMessage({...result,success:result.status==='ready'});
+    })().catch(() => event.ports?.[0]?.postMessage({success:false,status:'blocked'})));
+    return;
   }
-  
+
   if (event.data && event.data.type === 'GET_VERSION') {
     event.ports[0].postMessage({ version: CACHE_NAME });
   }

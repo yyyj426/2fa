@@ -7,6 +7,7 @@ import { SUPPORTED_LANGUAGES, normalizeLanguage } from '../shared/languages.js';
 import { encryptData } from './encryption.js';
 import { createHtmlResponse } from './response.js';
 import { dialogIcon } from '../ui/dialogIcons.js';
+import { isAppearanceSafeMode } from '../ui/publicAppearance.js';
 import { getStandaloneHead, getStandaloneI18nScript, getStandaloneLanguageSelect, getStandaloneText } from '../ui/standalone.js';
 import { getRequestLanguage, translateServerMessage } from './i18n.js';
 
@@ -224,7 +225,10 @@ export function extractOAuthProviderError(data, fallbackMessage, translateError)
  * @param {Object} payload - callback result
  * @returns {Response} HTML response
  */
-export function createOAuthPopupResponse(request, payload) {
+export function createOAuthPopupResponse(request, payload, themeAppearance = null) {
+	if (isAppearanceSafeMode(request)) {
+		themeAppearance = null;
+	}
 	const { appOrigin, language: requestedLanguage, messageParts, ...messageData } = payload || {};
 	const language = requestedLanguage ? normalizeLanguage(requestedLanguage) || 'en' : getRequestLanguage(request, 'en');
 	const t = (key) => getStandaloneText(language, key);
@@ -273,7 +277,10 @@ export function createOAuthPopupResponse(request, payload) {
     .oauth-result .page-icon { justify-content: center; color: var(--page-${appearance.color}); }
     .oauth-result .page-description { overflow-wrap: anywhere; }
     .oauth-result .page-actions { justify-content: center; }
+    .oauth-brand {display:inline-flex;align-items:center;gap:8px;margin-bottom:16px;color:var(--page-muted);text-decoration:none;font-weight:600;}
   `,
+		themeAppearance,
+		{ brandOnly: true },
 	)}
 </head>
 <body>

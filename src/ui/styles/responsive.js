@@ -554,45 +554,9 @@ export function getResponsiveStyles() {
       .btn {
         width: 100%;
       }
-    }
     
-    /* 大屏幕手机和小平板适配 */
-    @media (min-width: 481px) and (max-width: 767px) {
-      /* 容器宽度适配 */
-      .container {
-        max-width: 600px;
-      }
-
-      body {
-        padding: 8px;
-      }
-      
-      .secrets-list,
-      .service-group-grid {
-        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-        gap: 12px;
-        justify-content: center;
-        text-align: left;
-      }
-
-      .content {
-        text-align: center;
-      }
-
-      .secret-header {
-        flex-wrap: nowrap;
-        align-items: center;
-      }
-      
-      .secret-actions {
-        flex-wrap: wrap;
-      }
-      
-      .action-btn {
-        font-size: 12px;
-        min-width: 50px;
-      }
-    }
+    /* The former 481–767px block was preceded by an unmatched closing brace
+       and ignored by browsers. Keep the established base/mobile layout here. */
 
     /* 平板和中等桌面屏幕适配 */
     @media (min-width: 768px) and (max-width: 1199px) {
@@ -1043,7 +1007,6 @@ export function getResponsiveStyles() {
       box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
       backdrop-filter: blur(10px);
       border: 1px solid var(--toast-border);
-      min-width: 200px;
       max-width: min(90vw, 560px);
       text-align: center;
       font-size: 16px;
@@ -1068,7 +1031,6 @@ export function getResponsiveStyles() {
       .toast-content {
         padding: 14px 20px;
         font-size: 15px;
-        min-width: 180px;
         border-radius: 10px;
       }
 
@@ -1081,7 +1043,6 @@ export function getResponsiveStyles() {
       .toast-content {
         padding: 12px 16px;
         font-size: 14px;
-        min-width: 160px;
         border-radius: 8px;
       }
 
@@ -1157,7 +1118,6 @@ export function getResponsiveStyles() {
       .toast-content {
         padding: 18px 28px;
         font-size: 17px;
-        min-width: 220px;
         border-radius: 14px;
       }
 
@@ -1170,7 +1130,6 @@ export function getResponsiveStyles() {
       .toast-content {
         padding: 20px 32px;
         font-size: 18px;
-        min-width: 240px;
         border-radius: 16px;
       }
 

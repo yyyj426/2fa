@@ -1,5 +1,6 @@
 import { STANDALONE_LOCALES } from './locales/standalone.js';
 import { normalizeLanguage, LANGUAGE_OPTIONS } from '../shared/languages.js';
+import { getPublicAppearanceHead } from './publicAppearance.js';
 
 export function getStandaloneText(language, key, params = {}) {
 	const value = STANDALONE_LOCALES[normalizeLanguage(language)]?.[key] || STANDALONE_LOCALES.en[key] || key;
@@ -26,7 +27,11 @@ export function getStandaloneI18nScript({ language = 'en', titleKey = '', prefer
       standaloneLanguage = language;
       document.documentElement.lang = language;
       const titleKey = ${JSON.stringify(titleKey)};
-      if (titleKey) document.title = standaloneT(titleKey);
+      if (titleKey) {
+        const brand = document.querySelector?.('meta[data-standalone-brand-name]')?.getAttribute('content') || '';
+        const translatedTitle = standaloneT(titleKey);
+        document.title = brand ? (translatedTitle.includes('2FA') ? translatedTitle.replace(/2FA/g, () => brand) : translatedTitle + ' · ' + brand) : translatedTitle;
+      }
       document.querySelectorAll?.('[data-standalone-i18n]').forEach(function (element) {
         let params = {};
         try { params = JSON.parse(element.getAttribute('data-standalone-params') || '{}'); } catch { /* Use the plain translation. */ }
@@ -214,13 +219,76 @@ export function getStandaloneStyles() {
   `;
 }
 
-export function getStandaloneHead(title, extraStyles = '') {
+function escapeStandaloneText(value) {
+	return String(value ?? '').replace(
+		/[&<>"']/g,
+		(character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character],
+	);
+}
+
+export function getStandaloneBrand({ className = 'otp-brand', fallbackIcon = '' } = {}) {
+	return '<a class="' + escapeStandaloneText(className) + '" href="/">' + fallbackIcon + '<span>2FA</span></a>';
+}
+
+/** Standalone surfaces inherit public tokens, without mounting workspace components. */
+function getStandaloneAppearanceStyles(appearance) {
+	if (!appearance || appearance.kind === 'app' || appearance.manifest?.kind === 'app') {
+		return '';
+	}
+	const manifest = appearance.manifest || {};
+	let css =
+		`:root {--2fa-background:#fafafa;--2fa-surface:#fff;--2fa-text:#242424;--2fa-muted:#616161;--2fa-accent:#0f6cbd;--2fa-border:#e0e0e0;--2fa-hover:#f0f0f0;--2fa-font:'Segoe UI',sans-serif;--2fa-code-font:ui-monospace,monospace;--2fa-radius:8px;--2fa-shadow:0 2px 4px #0000000a;--2fa-background-image:none;}
+    :root[data-theme="dark"] {--2fa-background:#1f1f1f;--2fa-surface:#292929;--2fa-text:#fff;--2fa-muted:#bdbdbd;--2fa-accent:#62abf5;--2fa-border:#424242;--2fa-hover:#383838;}
+  ` +
+		['light', 'dark']
+			.map(
+				(mode) =>
+					':root[data-theme="' +
+					mode +
+					'"]{' +
+					Object.entries(manifest.tokens?.[mode] || {})
+						.filter(([key]) => /^--(?:2fa|theme)-[a-z0-9-]+$/i.test(key))
+						.map(([key, value]) => key + ':' + value + ';')
+						.join('') +
+					'}',
+			)
+			.join('\n');
+	css += '\n' + (appearance.css || '') + '\n';
+	let variables = '';
+	for (const field of manifest.settings || []) {
+		if (field.binding?.type !== 'variable' || !/^--(?:2fa|theme)-[a-z0-9-]+$/i.test(field.binding.name)) {
+			continue;
+		}
+		const value = appearance.settings?.[field.key] ?? field.default;
+		variables += field.binding.name + ':' + String(value ?? '') + (field.type === 'number' ? field.binding.unit || '' : '') + ';';
+	}
+	css +=
+		':root[data-theme]{' +
+		variables +
+		`
+      --page-bg:var(--2fa-background);--page-surface:var(--2fa-surface);--page-hover:var(--2fa-hover,var(--2fa-surface));
+      --page-text:var(--2fa-text);--page-muted:var(--2fa-muted);--page-line:var(--2fa-border);--page-stroke:var(--2fa-border);
+      --page-brand:var(--2fa-accent);--page-shadow:var(--2fa-shadow);
+    }
+    body {font-family:var(--2fa-font);font-size:var(--2fa-font-size,14px);background-image:var(--2fa-background-image);background-size:cover;}
+    .standalone-card {border-radius:var(--2fa-radius);}
+    .token-value,.next-token-value {font-family:var(--2fa-code-font);}
+    .page-button,.page-button:hover {background:var(--page-brand);border-color:var(--page-brand);}
+  `;
+	return css;
+}
+
+export function getStandaloneHead(title, extraStyles = '', appearance = null, { brandOnly = false, safeMode = false } = {}) {
+	if (safeMode) {
+		appearance = null;
+	}
 	const safeTitle = String(title).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 	return `
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>${safeTitle}</title>
     <script>${getStandaloneThemeScript()}</script>
-    <style>${getStandaloneStyles()}${extraStyles}</style>
+    <style>${(getStandaloneStyles() + extraStyles + (brandOnly ? '' : getStandaloneAppearanceStyles(appearance))).replace(/<\/style/gi, '<\\/style')}</style>
+    ${getPublicAppearanceHead(appearance, { surface: 'standalone', safeMode })}
   `;
 }

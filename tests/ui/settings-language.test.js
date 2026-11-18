@@ -50,7 +50,7 @@ function harness(language = 'en') {
 			scheduleNumericPreferenceSave, saveNumericPreference, refreshSettingsLanguage,
 			applyOfflineQueueSummary, toggleOfflineQueueDetails, changeOfflineQueueOperation, refreshPwaLanguage,
 			updateSettingsPwaInstallButton, triggerPwaInstallFromSettings, showOfflineBanner,
-			checkForNewVersion, refreshVersionLanguage, showBrowserExtensionModal, copyExtensionInstanceUrl,
+			checkForNewVersion, refreshVersionLanguage, getAppAboutState, switchSettingsTab, showBrowserExtensionModal, copyExtensionInstanceUrl,
 			refreshBrowserExtensionLanguage, hideBrowserExtensionModal };
 		`,
 	)(
@@ -72,7 +72,7 @@ function harness(language = 'en') {
 		vi.fn(),
 		vi.fn(),
 	);
-	return { api, fetch, toast, confirm, listeners, storage };
+	return { api, fetch, toast, confirm, listeners, storage, navigator };
 }
 
 beforeEach(() => vi.useFakeTimers());
@@ -182,12 +182,30 @@ describe('settings and installation language behavior', () => {
 		expect(h.confirm).toHaveBeenCalledWith(
 			expect.objectContaining({ title: 'Cancel unsynced change', confirmText: 'Cancel change', cancelText: 'Keep change' }),
 		);
+		h.navigator.serviceWorker = { controller: {} };
 		h.api.showOfflineBanner();
 		h.api.setLanguage('zh-TW');
 		expect(document.getElementById('offlineQueueSummary').textContent).toBe('有 1 項尚未同步的變更');
 		expect(document.querySelector('.offline-queue-label').textContent).toContain('更新帳號');
 		expect(document.querySelector('#offlineQueue time').textContent).toBe(h.api.formatI18nDate(timestamp));
 		expect(document.querySelector('.offline-banner-text').textContent).toBe('離線模式 - 操作將在網路恢復後自動同步');
+	});
+
+	it('does not promise to keep offline changes on a page no worker controls yet', () => {
+		const h = harness();
+		h.listeners.get('offline')();
+		expect(h.toast).toHaveBeenLastCalledWith('📡', 'You are offline. This page cannot save changes until you reconnect.');
+		expect(document.querySelector('.offline-banner-text').textContent).toBe(
+			'Offline mode - this page cannot save changes offline yet; reload it once after reconnecting',
+		);
+		h.api.setLanguage('zh-CN');
+		expect(document.querySelector('.offline-banner-text').textContent).toBe('离线模式 - 本页面还不能离线保存修改，联网后刷新一次即可');
+		// A controlled page keeps its changes for syncing and says so.
+		document.getElementById('offline-banner').remove();
+		h.navigator.serviceWorker = { controller: {} };
+		h.listeners.get('offline')();
+		expect(h.toast).toHaveBeenLastCalledWith('📡', '已离线，操作将保存待同步');
+		expect(document.querySelector('.offline-banner-text').textContent).toBe('离线模式 - 操作将在网络恢复后自动同步');
 	});
 
 	it('refreshes a cached version notice and extension copy result while preserving the instance URL', async () => {
@@ -204,5 +222,47 @@ describe('settings and installation language behavior', () => {
 		expect(document.getElementById('extensionInstanceUrl').value).toBe('https://2fa.example');
 		expect(h.fetch).not.toHaveBeenCalled();
 		h.api.hideBrowserExtensionModal();
+	});
+
+	it('shows the version and a found release on the About page, in the active language', async () => {
+		const h = harness();
+		h.api.setLanguage('en');
+		h.api.switchSettingsTab('about');
+		expect(document.getElementById('settingsAboutVersion').textContent).toBe(`Current version: v${h.api.getAppAboutState().version}`);
+		expect(document.getElementById('settingsAboutStatus').hidden).toBe(true);
+		h.storage.set('2fa-version-check', JSON.stringify({ latest: 'v99.0.0', checkedAt: Date.now() }));
+		await h.api.checkForNewVersion();
+		expect(document.getElementById('settingsAboutStatus').textContent).toBe('🆕 New version available: v99.0.0');
+		expect(document.getElementById('settingsAboutUpdate').hidden).toBe(false);
+		expect(h.api.getAppAboutState()).toMatchObject({ latestVersion: '99.0.0', upToDate: false, license: 'MIT' });
+		h.api.setLanguage('zh-CN');
+		expect(document.getElementById('settingsAboutLicense').textContent).toBe('开源许可：MIT');
+		// The official footer has its own badge; the floating notice is for app themes only.
+		expect(document.getElementById('appReleaseNotice').hidden).toBe(true);
+	});
+
+	it('reports an up-to-date version once the check has run', async () => {
+		const h = harness();
+		h.storage.set('2fa-version-check', JSON.stringify({ latest: 'v0.0.1', checkedAt: Date.now() }));
+		await h.api.checkForNewVersion();
+		expect(document.getElementById('settingsAboutStatus').textContent).toBe('You have the latest version');
+		expect(document.getElementById('settingsAboutUpdate').hidden).toBe(true);
+		expect(h.api.getAppAboutState()).toMatchObject({ latestVersion: null, upToDate: true });
+	});
+
+	it('shows a release notice under an app theme until it is dismissed for that version', async () => {
+		const h = harness();
+		document.getElementById('officialThemeFooter').remove();
+		h.storage.set('2fa-version-check', JSON.stringify({ latest: 'v99.0.0', checkedAt: Date.now() }));
+		await h.api.checkForNewVersion();
+		const notice = document.getElementById('appReleaseNotice');
+		expect(notice.hidden).toBe(false);
+		expect(notice.querySelector('.app-release-notice-message').textContent).toBe('🆕 New version available: v99.0.0');
+		expect(notice.querySelector('a').getAttribute('href')).toBe('https://github.com/wuzf/2fa/releases/latest');
+		notice.querySelector('button').click();
+		expect(notice.hidden).toBe(true);
+		expect(h.storage.get('2fa-release-notice-dismissed')).toBe('v99.0.0');
+		h.api.refreshVersionLanguage();
+		expect(notice.hidden).toBe(true);
 	});
 });

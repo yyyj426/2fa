@@ -55,6 +55,7 @@ function createHarness({ settings = { jwtExpiryDays: 30, maxBackups: 100, defaul
 		authenticatedFetch: fetch,
 		getOTPAnimationMode: () => 'none',
 		showCenterToast: vi.fn(),
+		Date,
 		setTimeout,
 		clearTimeout,
 	});
@@ -104,8 +105,9 @@ describe('numeric preference autosave', () => {
 		h.input('settingsJwtExpiryDays', '60');
 		await h.blur('settingsJwtExpiryDays');
 		h.input('settingsMaxBackups', '0');
-		await h.enter('settingsMaxBackups');
-		await vi.advanceTimersByTimeAsync(1000);
+		const savingBackups = h.enter('settingsMaxBackups');
+		await vi.advanceTimersByTimeAsync(1100);
+		await savingBackups;
 		expect(h.posts()).toEqual([{ jwtExpiryDays: 60 }, { maxBackups: 0 }]);
 		expect(h.api.event.preventDefault).toHaveBeenCalledOnce();
 		expect(h.elements.get('settingsMaxBackupsResult').textContent).toBe('已保存，备份不限数量');
@@ -180,7 +182,9 @@ describe('numeric preference autosave', () => {
 		await vi.advanceTimersByTimeAsync(500);
 		expect(h.posts()).toEqual([{ jwtExpiryDays: 45 }]);
 		pending[0].resolve(reply({ success: true }));
-		await vi.advanceTimersByTimeAsync(0);
+		await vi.advanceTimersByTimeAsync(1099);
+		expect(h.posts()).toEqual([{ jwtExpiryDays: 45 }]);
+		await vi.advanceTimersByTimeAsync(1);
 		expect(h.posts()).toEqual([{ jwtExpiryDays: 45 }, { jwtExpiryDays: 47 }]);
 		expect(h.elements.get('settingsJwtExpiryDays').value).toBe('47');
 		expect(h.elements.get('settingsJwtExpiryResult').textContent).toBe('保存中…');
@@ -215,10 +219,12 @@ describe('numeric preference autosave', () => {
 		await vi.advanceTimersByTimeAsync(0);
 		expect(h.posts()).toHaveLength(1);
 		pending[0]();
-		await vi.advanceTimersByTimeAsync(0);
+		await vi.advanceTimersByTimeAsync(1099);
+		expect(h.posts()).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
 		expect(h.posts()).toHaveLength(2);
 		pending[1]();
-		await vi.advanceTimersByTimeAsync(0);
+		await vi.advanceTimersByTimeAsync(1100);
 		expect(h.posts()).toHaveLength(3);
 		pending[2]();
 		await Promise.all([days, backups, format]);
@@ -244,10 +250,39 @@ describe('numeric preference autosave', () => {
 		expect(h.elements.get('settingsMaxBackupsResult').className).toContain('error');
 		expect(h.elements.get('settingsMaxBackupsResult').textContent).toContain(failure === 'network' ? '未保存' : '暂时无法保存');
 		fail = false;
-		await h.blur('settingsMaxBackups');
+		const retrying = h.blur('settingsMaxBackups');
+		await vi.advanceTimersByTimeAsync(1099);
+		expect(h.posts()).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
+		await retrying;
 		expect(h.settings.maxBackups).toBe(80);
 		expect(h.posts()).toHaveLength(2);
 		expect(h.elements.get('settingsMaxBackupsResult').className).toContain('success');
+	});
+
+	it.each(['numeric', 'export format'])('does not submit a discarded %s draft after the shared save wait', async (kind) => {
+		const h = createHarness();
+		await h.api.loadPreferences();
+		h.input('settingsJwtExpiryDays', '60');
+		await h.blur('settingsJwtExpiryDays');
+		let saving;
+		if (kind === 'numeric') {
+			h.input('settingsMaxBackups', '7');
+			saving = h.blur('settingsMaxBackups');
+		} else {
+			h.elements.get('settingsDefaultExportFormat').value = 'csv';
+			saving = h.api.saveDefaultExportFormat();
+		}
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(h.posts()).toEqual([{ jwtExpiryDays: 60 }]);
+		expect(h.api.hasUnsavedSettingsChanges()).toBe(true);
+		h.api.discardSettingsDrafts();
+		await vi.advanceTimersByTimeAsync(1100);
+		await saving;
+		expect(h.posts()).toEqual([{ jwtExpiryDays: 60 }]);
+		expect(h.settings.maxBackups).toBe(100);
+		expect(h.settings.defaultExportFormat).toBe('json');
+		expect(h.api.hasUnsavedSettingsChanges()).toBe(false);
 	});
 
 	it('resends the original value if an intervening save lost its response', async () => {
@@ -272,7 +307,7 @@ describe('numeric preference autosave', () => {
 		h.input('settingsJwtExpiryDays', '30');
 		await vi.advanceTimersByTimeAsync(500);
 		lost.reject(new Error('Response lost after server saved'));
-		await vi.advanceTimersByTimeAsync(0);
+		await vi.advanceTimersByTimeAsync(1100);
 		expect(h.posts()).toEqual([{ jwtExpiryDays: 45 }, { jwtExpiryDays: 30 }]);
 		expect(h.settings.jwtExpiryDays).toBe(30);
 	});
@@ -281,12 +316,37 @@ describe('numeric preference autosave', () => {
 		const h = createHarness();
 		h.input('settingsJwtExpiryDays', '120');
 		h.input('settingsMaxBackups', '0');
-		await vi.advanceTimersByTimeAsync(500);
+		await vi.advanceTimersByTimeAsync(1600);
 		const reloaded = createHarness({ settings: h.settings });
 		await reloaded.api.loadPreferences();
 		expect(reloaded.elements.get('settingsJwtExpiryDays').value).toBe('120');
 		expect(reloaded.elements.get('settingsMaxBackups').value).toBe('0');
 		expect(reloaded.posts()).toEqual([]);
+	});
+});
+
+describe('SDK preference bridge', () => {
+	it('validates the whole patch before applying local settings and reports remote language failures honestly', async () => {
+		const h = createHarness({
+			fetchImpl: async () => {
+				throw new Error('network unavailable');
+			},
+		});
+		h.api.applyTheme = vi.fn();
+		expect(await h.api.setThemePublicPreferences({ theme: 'dark', unknown: true })).toMatchObject({ status: 'rejected' });
+		expect(h.storage.has('theme')).toBe(false);
+		expect(await h.api.setThemePublicPreferences({ language: 'en' })).toEqual({ status: 'unknown', reason: 'language-local-only' });
+		expect(h.api.getLanguage()).toBe('en');
+	});
+
+	it('does not write a queued language preference into a later session', async () => {
+		const h = createHarness();
+		h.api.secretSessionGeneration = 3;
+		h.api.isSecretSessionCurrent = (generation) => generation === h.api.secretSessionGeneration;
+		const saving = h.api.setThemePublicPreferences({ language: 'en' });
+		h.api.secretSessionGeneration = 4;
+		expect(await saving).toMatchObject({ status: 'session-invalidated' });
+		expect(h.posts()).toEqual([]);
 	});
 });
 

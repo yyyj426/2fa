@@ -149,6 +149,8 @@ export function getI18nCode() {
         const manifest = document.querySelector('link[rel="manifest"]');
         if (manifest) manifest.setAttribute('href', '/manifest.json?lang=' + encodeURIComponent(currentResolvedLanguage));
       }
+      if (typeof updateAppearanceBranding === 'function') updateAppearanceBranding();
+      if (typeof refreshAppearanceLanguage === 'function') refreshAppearanceLanguage();
     }
 
     function setLanguage(lang, options = {}) {
@@ -175,7 +177,9 @@ export function getI18nCode() {
       // 重新渲染当前可能处于活动状态的动态列表。登录后读到的语言偏好通常与本地相同，
       // 界面语言不变时列表内容和排序都不变，不必整表重绘。
       if (previousLanguage !== currentResolvedLanguage) {
-        if (typeof renderSecrets === 'function' && typeof secrets !== 'undefined' && Array.isArray(secrets) && secrets.length > 0) {
+        if (typeof getAccountViewState === 'function') {
+          getAccountViewState().invalidate('language');
+        } else if (typeof renderSecrets === 'function' && typeof secrets !== 'undefined' && Array.isArray(secrets) && secrets.length > 0) {
           renderSecrets();
         } else if (typeof updateSearchStats === 'function') {
           updateSearchStats();
@@ -196,6 +200,7 @@ export function getI18nCode() {
       if (typeof refreshAuthLanguage === 'function') refreshAuthLanguage();
       if (typeof refreshConfirmDialogLanguage === 'function') refreshConfirmDialogLanguage();
       if (typeof refreshModuleLoaderLanguage === 'function') refreshModuleLoaderLanguage();
+      if (typeof notifyThemeRuntimeEnvironment === 'function') notifyThemeRuntimeEnvironment('language');
     }
 
     function formatI18nDate(date, options) {

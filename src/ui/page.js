@@ -8,20 +8,39 @@ import { getStyles } from './styles/index.js';
 import { getScripts, getCoreScripts } from './scripts/index.js';
 import { dialogIcon } from './dialogIcons.js';
 import { APP_VERSION } from '../utils/version.js';
+import { APP_LINKS } from './scripts/versionCheck.js';
 import { getPageSecurityHeaders } from '../utils/security.js';
+import { getEnabledCustomCode, sanitizeCustomCode } from '../utils/settings.js';
 import { LANGUAGE_OPTIONS, normalizeLanguage } from '../shared/languages.js';
+import { getAppearanceHead } from './appearance.js';
+import { getBuildId } from '../utils/build.js';
+import { getShellConfigId, getRuntimeTuple, getAdminCodeId } from './runtimeIdentity.js';
+import { getPublicAppearanceHead } from './publicAppearance.js';
 
 /**
  * 创建主页面（密钥管理界面）
  * @param {Object} options - 配置选项
  * @param {boolean} options.lazyLoad - 是否启用懒加载（默认true）
+ * @param {string} options.customCode - 管理员保存的自定义 HTML、样式及脚本
+ * @param {Array} options.customCodes - 多条自定义代码，按顺序加载启用的条目
  * @returns {Response} HTML响应
  */
 export async function createMainPage(options = {}) {
-	const { lazyLoad = true } = options;
+	const { lazyLoad = true, customCode = '', customCodes, appearance = null, safeMode = false, buildId = getBuildId() } = options;
 
 	// 构建完整的HTML内容
-	const html = buildCompleteHTML(lazyLoad);
+	const enabledCode = customCodes === undefined ? sanitizeCustomCode(customCode) : getEnabledCustomCode({ customCodes });
+	const adminCodeId = await getAdminCodeId(safeMode ? '' : enabledCode);
+	const shellConfigId = await getShellConfigId({ appearance, adminCodeId, safeMode });
+	const recoveryConfigId = safeMode ? shellConfigId : await getShellConfigId({ safeMode: true });
+	const tuple = getRuntimeTuple(appearance, buildId, safeMode);
+	const html = buildCompleteHTML(safeMode ? false : lazyLoad, safeMode ? '' : enabledCode, safeMode ? null : appearance, {
+		buildId,
+		safeMode,
+		shellConfigId,
+		adminCodeId,
+		recoveryConfigId,
+	});
 
 	return new Response(html, {
 		headers: {
@@ -30,6 +49,12 @@ export async function createMainPage(options = {}) {
 			'Cache-Control': 'no-cache, no-store, must-revalidate',
 			Pragma: 'no-cache',
 			Expires: '0',
+			'X-2FA-Build': buildId,
+			'X-2FA-Appearance-Revision': String(safeMode ? 0 : appearance?.revision || 0),
+			'X-2FA-SDK-Api-Version': '1',
+			'X-2FA-Package-Id': tuple.packageId || '',
+			'X-2FA-Runtime-Mode': tuple.mode,
+			'X-2FA-Shell-Config': shellConfigId,
 		},
 	});
 }
@@ -38,14 +63,28 @@ export async function createMainPage(options = {}) {
  * 构建完整的HTML内容
  * @param {boolean} lazyLoad - 是否启用懒加载
  */
-function buildCompleteHTML(lazyLoad = true) {
-	return getHTMLStart() + getStyles() + getHTMLBody() + getHTMLScripts(lazyLoad) + getHTMLEnd();
+function buildCompleteHTML(lazyLoad = true, customCode = '', appearance = null, context = {}) {
+	// Render trusted administrator code as HTML so native script ordering and
+	// DOMContentLoaded/load handlers work, including external scripts.
+	return (
+		getHTMLStart(context.safeMode) +
+		getAppearanceHead(appearance, context) +
+		getStyles().replace(
+			/<\/head>$/,
+			() => getPublicAppearanceHead(appearance, { surface: 'host', safeMode: context.safeMode }) + '</head>',
+		) +
+		getHTMLBody(appearance) +
+		getHTMLScripts(lazyLoad) +
+		customCode +
+		getHTMLEnd()
+	);
 }
 
 /**
  * HTML文档开始部分
  */
-function getHTMLStart() {
+function getHTMLStart(safeMode = false) {
+	const recoveryQuery = safeMode ? '?safeMode=1' : '';
 	return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -54,7 +93,7 @@ function getHTMLStart() {
   <title>2FA - 密钥管理器</title>
 
   <!-- PWA Manifest -->
-  <link rel="manifest" href="/manifest.json">
+  <link rel="manifest" href="/manifest.json${recoveryQuery}">
 
   <!-- PWA Meta Tags -->
   <meta name="application-name" content="2FA">
@@ -66,19 +105,19 @@ function getHTMLStart() {
   <meta name="apple-mobile-web-app-title" content="2FA">
   
   <!-- iOS Icons -->
-  <link rel="apple-touch-icon" href="/icon-192.png">
-  <link rel="apple-touch-icon" sizes="180x180" href="/icon-192.png">
-  <link rel="apple-touch-icon" sizes="152x152" href="/icon-192.png">
-  <link rel="apple-touch-icon" sizes="120x120" href="/icon-192.png">
+  <link rel="apple-touch-icon" href="/icon-192.png${recoveryQuery}">
+  <link rel="apple-touch-icon" sizes="180x180" href="/icon-192.png${recoveryQuery}">
+  <link rel="apple-touch-icon" sizes="152x152" href="/icon-192.png${recoveryQuery}">
+  <link rel="apple-touch-icon" sizes="120x120" href="/icon-192.png${recoveryQuery}">
   
   <!-- Favicon -->
-  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
-  <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
-  <link rel="shortcut icon" href="/icon-192.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png${recoveryQuery}">
+  <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png${recoveryQuery}">
+  <link rel="shortcut icon" href="/icon-192.png${recoveryQuery}">
   
   <!-- Microsoft Tiles -->
   <meta name="msapplication-TileColor" content="#2196F3">
-  <meta name="msapplication-TileImage" content="/icon-192.png">
+  <meta name="msapplication-TileImage" content="/icon-192.png${recoveryQuery}">
   <meta name="msapplication-config" content="none">
   
   <!-- PWA Display -->
@@ -139,9 +178,23 @@ function getHTMLStart() {
 /**
  * HTML样式部分 - 包含所有原版样式
  */
-function getHTMLBody() {
+function getHTMLBody(appearance = null) {
+	const appTheme = appearance?.kind === 'app' || appearance?.manifest?.themeApiVersion === 2;
 	return `
 <body class="fluent-app">
+  ${
+		appTheme
+			? `<section id="appThemeStartup" role="status" aria-live="polite" aria-atomic="true">
+    <p class="app-theme-status-message" data-i18n="loading">加载中...</p>
+    <a id="appThemeStartupRecovery" href="/?safeMode=1" data-i18n="appearanceUseDefault">使用默认界面</a>
+  </section>`
+			: ''
+	}
+  <div id="appThemeRuntimeStatus" class="app-theme-status" role="status" aria-live="polite" aria-atomic="true" tabindex="-1" hidden></div>
+  <div id="appReleaseNotice" class="app-release-notice" role="status" hidden></div>
+  <main id="appThemeRoot" hidden></main>
+  <div id="hostThemePanels" hidden></div>
+  <div id="officialThemeRoot">
   <div class="container">
     <div class="content">
       <div class="search-section">
@@ -271,6 +324,7 @@ function getHTMLBody() {
 <button type="button" class="workspace-action" data-i18n="emptyAddBtn" onclick="showAddModal()">添加密钥</button>
       </div>
     </div>
+  </div>
   </div>
   
   
@@ -577,7 +631,7 @@ function getHTMLBody() {
       </div>
       
       <div class="tools-list">
-        <button type="button" class="tool-item" onclick="showQRScanAndDecode()">
+        <button type="button" class="tool-item" onclick="openToolsFromMenu('qr-decode')">
           <div class="tool-icon">${dialogIcon('qr')}</div>
           <div class="tool-content">
             <div class="tool-title" data-i18n="toolQrDecodeTitle">二维码解析</div>
@@ -585,7 +639,7 @@ function getHTMLBody() {
           </div>
         </button>
         
-        <button type="button" class="tool-item" onclick="showQRGenerateTool()">
+        <button type="button" class="tool-item" onclick="openToolsFromMenu('qr-generate')">
           <div class="tool-icon">${dialogIcon('qr')}</div>
           <div class="tool-content">
             <div class="tool-title" data-i18n="toolQrGenTitle">二维码生成</div>
@@ -593,7 +647,7 @@ function getHTMLBody() {
           </div>
         </button>
 
-        <button type="button" class="tool-item" onclick="showBase32Tool()">
+        <button type="button" class="tool-item" onclick="openToolsFromMenu('base32')">
           <div class="tool-icon">${dialogIcon('code')}</div>
           <div class="tool-content">
             <div class="tool-title" data-i18n="toolBase32Title">Base32 编解码</div>
@@ -601,7 +655,7 @@ function getHTMLBody() {
           </div>
         </button>
 
-        <button type="button" class="tool-item" onclick="showTimestampTool()">
+        <button type="button" class="tool-item" onclick="openToolsFromMenu('timestamp')">
           <div class="tool-icon">${dialogIcon('clock')}</div>
           <div class="tool-content">
             <div class="tool-title" data-i18n="pageTimestampTitle">时间戳工具</div>
@@ -609,7 +663,7 @@ function getHTMLBody() {
           </div>
         </button>
 
-        <button type="button" class="tool-item" onclick="showKeyCheckTool()">
+        <button type="button" class="tool-item" onclick="openToolsFromMenu('key-check')">
           <div class="tool-icon">${dialogIcon('check')}</div>
           <div class="tool-content">
             <div class="tool-title" data-i18n="toolKeyCheckerTitle">密钥检查器</div>
@@ -617,7 +671,7 @@ function getHTMLBody() {
           </div>
         </button>
 
-        <button type="button" class="tool-item" onclick="showKeyGeneratorTool()">
+        <button type="button" class="tool-item" onclick="openToolsFromMenu('key-generate')">
           <div class="tool-icon">${dialogIcon('key')}</div>
           <div class="tool-content">
             <div class="tool-title" data-i18n="toolKeyGenTitle">密钥生成器</div>
@@ -652,7 +706,7 @@ function getHTMLBody() {
       <div class="tool-section" id="qrResultSection" style="display: none;">
         <div class="section-title" data-i18n="pageGeneratedQr">生成的二维码</div>
         <div class="qr-display">
-          <img id="generatedQRCode" class="qr-image" style="max-width: 300px; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);" />
+          <img id="generatedQRCode" class="qr-image host-qr-image" style="max-width: 300px;" />
           <div class="qr-tip" style="margin-top: 10px; font-size: var(--dialog-caption-size); color: var(--text-tertiary);" data-i18n="pageSaveImageHint">长按保存图片</div>
         </div>
       </div>
@@ -684,7 +738,7 @@ function getHTMLBody() {
             <button class="btn btn-primary" onclick="encodeBase32()" data-i18n="pageEncode">编码</button>
             <button class="btn btn-info" onclick="copyEncodedText()" data-i18n="copy">复制</button>
           </div>
-          <div id="encodedResult" class="result-text" style="margin-top: 10px; padding: 10px; background: var(--bg-secondary); border-radius: 6px; font-family: monospace; font-size: var(--dialog-caption-size); min-height: 0; word-break: break-all; display: none; color: var(--text-primary);"></div>
+          <div id="encodedResult" class="result-text" style="display: none;"></div>
         </div>
       </div>
       
@@ -703,7 +757,7 @@ function getHTMLBody() {
             <button class="btn btn-primary" onclick="decodeBase32()" data-i18n="pageDecode">解码</button>
             <button class="btn btn-info" onclick="copyDecodedText()" data-i18n="copy">复制</button>
           </div>
-          <div id="decodedResult" class="result-text" style="margin-top: 10px; padding: 10px; background: var(--bg-secondary); border-radius: 6px; font-family: monospace; font-size: var(--dialog-caption-size); min-height: 0; word-break: break-all; display: none; color: var(--text-primary);"></div>
+          <div id="decodedResult" class="result-text" style="display: none;"></div>
         </div>
       </div>
       
@@ -721,7 +775,7 @@ function getHTMLBody() {
       
       <div class="tool-section">
         <div class="section-title" data-i18n="pageTotpTime">TOTP 时间信息</div>
-        <div class="time-info" style="background: var(--bg-secondary); padding: 15px; border-radius: 4px; margin-bottom: 15px;">
+        <div class="time-info">
           <div class="info-item" style="display: flex; justify-content: space-between; margin-bottom: 8px;">
             <span class="label" style="font-weight: 600; color: var(--text-primary);" data-i18n="pageCurrentTimestamp">当前时间戳:</span>
             <span class="value" id="currentTimestamp" style="font-family: monospace; color: var(--text-primary);"></span>
@@ -780,7 +834,7 @@ function getHTMLBody() {
       
       <div class="tool-section" id="keyCheckResult" style="display: none;">
         <div class="section-title" data-i18n="pageKeyCheckResult">检查结果</div>
-        <div id="checkResultContent" class="check-result" style="padding: 15px; border-radius: 4px; margin-bottom: 15px;">
+        <div id="checkResultContent" class="check-result">
           <!-- 结果内容将在这里动态生成 -->
         </div>
       </div>
@@ -811,12 +865,12 @@ function getHTMLBody() {
             <div class="video-wrapper">
               <video id="decodeScannerVideo" autoplay playsinline muted></video>
               <div class="scanner-overlay" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none;">
-                <div class="scanner-frame" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 60%; height: 60%; border: 2px solid #fff; border-radius: 4px;"></div>
+                <div class="scanner-frame" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 60%; height: 60%; border: 2px solid #fff;"></div>
               </div>
             </div>
           </div>
           <div id="decodeScannerStatus" class="scanner-status" style="text-align: center; margin: 10px 0; font-size: var(--dialog-body-size); color: var(--text-secondary);" data-i18n="scannerStarting">正在启动摄像头...</div>
-          <div id="decodeScannerError" class="scanner-error" style="display: none; text-align: center; margin: 10px 0; padding: 10px; background: var(--danger-light); border: 1px solid var(--border-error); border-radius: 6px; color: var(--danger-dark);">
+          <div id="decodeScannerError" class="scanner-error decode-scanner-error" style="display: none;">
             <div id="decodeErrorMessage"></div>
             <button class="btn btn-primary" onclick="retryDecodeCamera()" style="margin-top: 10px;" data-i18n="retry">重试</button>
           </div>
@@ -825,7 +879,7 @@ function getHTMLBody() {
       
       <div class="tool-section" id="decodeResultSection" style="display: none;">
         <div class="section-title" data-i18n="pageDecodedResult">解析结果</div>
-        <div class="decode-result" style="background: var(--bg-secondary); padding: 15px; border-radius: 4px; margin-bottom: 15px;">
+        <div class="decode-result">
           <div class="result-content" id="decodeResultContent" style="font-family: monospace; font-size: var(--dialog-body-size); word-break: break-all; line-height: 1.5; max-height: 200px; overflow-y: auto; color: var(--text-primary);"></div>
           <div class="result-actions" style="display: flex; gap: 10px; margin-top: 15px;">
             <button class="btn btn-info" onclick="copyDecodeResult()" style="flex: 1;" data-i18n="pageCopyContent">复制内容</button>
@@ -834,7 +888,7 @@ function getHTMLBody() {
         </div>
         <div class="qr-section" id="decodeQRSection" style="display: none; text-align: center;">
           <div class="qr-title" style="font-weight: 600; margin-bottom: 10px; color: var(--text-primary);" data-i18n="pageRegeneratedQr">重新生成的二维码</div>
-          <img id="decodeQRCode" class="qr-code" style="max-width: 200px; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);" />
+          <img id="decodeQRCode" class="qr-code host-qr-image" style="max-width: 200px;" />
           <div class="qr-tip" style="margin-top: 8px; font-size: var(--dialog-caption-size); color: var(--text-tertiary);" data-i18n="pageQrPreviewHint">点击二维码可以预览</div>
         </div>
       </div>
@@ -867,7 +921,7 @@ function getHTMLBody() {
       
       <div class="tool-section" id="keyResultSection" style="display: none;">
         <div class="section-title" data-i18n="pageGeneratedResult">生成结果</div>
-        <div class="key-result" style="padding: 15px; border-radius: 4px; margin-bottom: 15px; background: var(--bg-secondary);">
+        <div class="key-result">
           <div class="key-text" id="generatedKeyText" style="font-family: monospace; font-size: var(--dialog-body-size); font-weight: 600; text-align: center; margin-bottom: 15px; word-break: break-all; color: var(--text-primary);"></div>
           <div class="key-actions" style="display: flex; justify-content: center;">
             <button class="btn btn-info" onclick="copyGeneratedKey()" data-i18n="pageCopyKey">复制密钥</button>
@@ -1020,7 +1074,7 @@ function getHTMLBody() {
       </div>
 
       <div class="tool-section">
-        <div id="oneDriveOauthWarning" class="advanced-info" style="display:none; margin-bottom: 12px; padding: 12px; border-radius: 6px; font-size: var(--dialog-caption-size); color: var(--warning-color, #b45309); background: var(--bg-secondary); line-height: 1.6;"></div>
+        <div id="oneDriveOauthWarning" class="advanced-info oauth-warning" style="display:none;"></div>
 
         <div id="oneDriveDestinationList" style="margin-bottom: 15px;"></div>
 
@@ -1065,7 +1119,7 @@ function getHTMLBody() {
       </div>
 
       <div class="tool-section">
-        <div id="googleDriveOauthWarning" class="advanced-info" style="display:none; margin-bottom: 12px; padding: 12px; border-radius: 6px; font-size: var(--dialog-caption-size); color: var(--warning-color, #b45309); background: var(--bg-secondary); line-height: 1.6;"></div>
+        <div id="googleDriveOauthWarning" class="advanced-info oauth-warning" style="display:none;"></div>
 
         <div id="googleDriveDestinationList" style="margin-bottom: 15px;"></div>
 
@@ -1122,8 +1176,41 @@ function getHTMLBody() {
             <span class="settings-tab-icon">${dialogIcon('sliders')}</span>
             <span class="settings-tab-text" data-i18n="settingsTabPreferences">偏好设置</span>
           </button>
+          <button type="button" class="settings-tab" data-tab="custom-code" onclick="switchSettingsTab('custom-code')">
+            <span class="settings-tab-icon">${dialogIcon('code')}</span>
+            <span class="settings-tab-text" data-i18n="settingsTabCustomCode">自定义代码</span>
+          </button>
+          <button type="button" class="settings-tab" onclick="showAppearanceEditor()">
+            <span class="settings-tab-icon">${dialogIcon('sliders')}</span>
+            <span class="settings-tab-text" data-i18n="appearanceTitle">外观与主题</span>
+          </button>
+          <button type="button" class="settings-tab" data-tab="about" onclick="switchSettingsTab('about')">
+            <span class="settings-tab-icon">${dialogIcon('info')}</span>
+            <span class="settings-tab-text" data-i18n="settingsTabAbout">关于</span>
+          </button>
         </div>
         <div class="settings-content">
+          <div class="settings-panel" data-panel="custom-code">
+            <div class="settings-section">
+              <h3 class="settings-section-title" id="settingsCustomCodeTitle" data-i18n="customCodeTitle">自定义代码（包括 style 和 script）</h3>
+              <p class="settings-desc" id="settingsCustomCodeDesc" data-i18n="customCodeDesc">可添加多条 HTML、style 和 script 代码并单独开关。修改会自动保存，并在停止输入后自动刷新生效。</p>
+              <div class="settings-code-toolbar">
+                <div class="settings-code-actions">
+                  <button type="button" class="btn btn-secondary" id="settingsCustomCodeRetry" onclick="retryCustomCodeSave()" data-i18n="customCodeRetry" hidden>重试</button>
+                </div>
+                <div id="settingsCustomCodeResult" class="settings-result" role="status" aria-live="polite"></div>
+              </div>
+              <p id="settingsCustomCodeEmpty" class="settings-code-empty settings-desc" data-i18n="customCodeEmpty" hidden>还没有自定义代码，点击“添加代码”开始。</p>
+              <div id="settingsCustomCodeList" class="settings-code-list" aria-labelledby="settingsCustomCodeTitle" aria-describedby="settingsCustomCodeDesc"></div>
+              <div class="settings-code-actions settings-code-add-actions">
+                <button type="button" class="btn btn-primary" id="settingsCustomCodeAdd" onclick="addCustomCode()" data-i18n="customCodeAdd" hidden disabled>添加代码</button>
+              </div>
+              <div class="settings-info-box">
+                <span data-i18n="customCodeRecovery">代码影响页面使用时，可通过临时禁用入口打开页面并修改。</span>
+                <a href="/?disableCustomCode=1" data-i18n="customCodeRecoveryLink">临时禁用自定义代码</a>
+              </div>
+            </div>
+          </div>
           <!-- 账户安全面板 -->
           <div class="settings-panel active" data-panel="security">
             <div class="settings-section">
@@ -1301,9 +1388,29 @@ function getHTMLBody() {
               <button class="btn btn-primary btn-sm" id="settingsPwaInstallBtn" onclick="triggerPwaInstallFromSettings()" title="暂不可用（浏览器未触发安装提示）" disabled data-i18n-title="pwaUnavailable" data-i18n="pwaInstallBtn">安装到桌面</button>
             </div>
           </div>
+          <div class="settings-panel" data-panel="about">
+            <div class="settings-section">
+              <h3 class="settings-section-title">2FA Manager</h3>
+              <p class="settings-desc" id="settingsAboutVersion" data-i18n="aboutCurrentVersion" data-i18n-params='{"version":"v${APP_VERSION}"}'>当前版本：v${APP_VERSION}</p>
+              <p class="settings-desc" id="settingsAboutStatus" role="status" aria-live="polite" hidden></p>
+              <a class="btn btn-primary btn-sm" id="settingsAboutUpdate" href="${APP_LINKS.releases}" target="_blank" rel="noopener noreferrer" data-i18n="aboutViewUpdate" hidden>查看更新</a>
+            </div>
+            <div class="settings-divider"></div>
+            <div class="settings-section">
+              <div class="settings-about-links">
+                <a class="btn btn-secondary btn-sm" href="${APP_LINKS.documentation}" target="_blank" rel="noopener noreferrer" data-i18n="pageDocumentation">使用文档</a>
+                <button type="button" class="btn btn-secondary btn-sm" onclick="openBrowserExtensionStore()" data-i18n="pageBrowserExtension">浏览器扩展</button>
+                <a class="btn btn-secondary btn-sm" href="${APP_LINKS.feedback}" target="_blank" rel="noopener noreferrer" data-i18n="pageFeedback">反馈问题</a>
+                <a class="btn btn-secondary btn-sm" href="${APP_LINKS.source}" target="_blank" rel="noopener noreferrer" data-i18n="aboutSourceCode">源代码</a>
+              </div>
+              <p class="settings-desc settings-about-credit">Made with ❤️ by <a href="${APP_LINKS.author}" target="_blank" rel="noopener noreferrer">wuzf</a> · <span id="settingsAboutLicense" data-i18n="aboutLicense" data-i18n-params='{"license":"MIT"}'>开源许可：MIT</span></p>
+            </div>
+          </div>
         </div>
       </div>
-      <div class="settings-modal-actions"><button type="button" class="btn btn-primary" data-i18n="completed" data-dialog-dismiss onclick="hideSettingsModal()">完成</button></div>
+      <div class="settings-modal-actions">
+        <button type="button" class="btn btn-primary" data-i18n="completed" data-dialog-dismiss onclick="hideSettingsModal()">完成</button>
+      </div>
     </div>
   </div>
 
@@ -1528,7 +1635,7 @@ function getHTMLBody() {
         <button class="close-btn" type="button" aria-label="关闭弹窗" data-dialog-dismiss onclick="hideFreeOTPExportModal()" data-i18n-aria-label="pageCloseDialog">${dialogIcon('close')}</button>
       </div>
 
-      <div style="margin-bottom: 20px; padding: 15px; background: var(--bg-secondary); border-radius: 4px; font-size: var(--dialog-body-size);">
+      <div class="dialog-export-help">
         <p style="margin: 0 0 10px 0; color: var(--text-primary);">
           <strong data-i18n-html="pageFreeotpCount" data-i18n-count-id="freeotpExportCount">导出 <span id="freeotpExportCount">0</span> 个密钥到 FreeOTP</strong>
         </p>
@@ -1558,7 +1665,7 @@ function getHTMLBody() {
         <button class="close-btn" type="button" aria-label="关闭弹窗" data-dialog-dismiss onclick="hideTOTPAuthExportModal()" data-i18n-aria-label="pageCloseDialog">${dialogIcon('close')}</button>
       </div>
 
-      <div style="margin-bottom: 20px; padding: 15px; background: var(--bg-secondary); border-radius: 4px; font-size: var(--dialog-body-size);">
+      <div class="dialog-export-help">
         <p style="margin: 0 0 10px 0; color: var(--text-primary);">
           <strong data-i18n-html="pageTotpAuthCount" data-i18n-count-id="totpAuthExportCount">导出 <span id="totpAuthExportCount">0</span> 个密钥到 TOTP Authenticator</strong>
         </p>
@@ -1726,7 +1833,7 @@ function getHTMLBody() {
   </div>
 
   <!-- 页面底部链接 -->
-  <footer class="page-footer">
+  <footer class="page-footer" id="officialThemeFooter">
     <div class="footer-content">
       <div class="footer-links">
         <a href="https://github.com/wuzf/2fa/blob/main/README.md" target="_blank" rel="noopener noreferrer" class="footer-link" data-i18n="pageDocumentation">
@@ -1757,7 +1864,7 @@ function getHTMLBody() {
 
   <!-- 固定悬浮按钮组 -->
   <!-- 操作菜单按钮 -->
-  <div class="action-menu-float">
+  <div class="action-menu-float" id="officialThemeActions">
     <button class="main-action-button" id="mainActionBtn" aria-label="打开操作菜单" aria-expanded="false" aria-controls="actionSubmenu" onclick="toggleActionMenu()" title="操作菜单" data-i18n-title="pageActions" data-i18n-aria-label="pageOpenActions">
       ${dialogIcon('plus')}
     </button>
@@ -1802,7 +1909,9 @@ function getHTMLBody() {
  * @param {boolean} lazyLoad - 是否启用懒加载模式
  */
 function getHTMLScripts(lazyLoad = true) {
-	const scriptContent = getInlineScripts(lazyLoad);
+	// Embedded preview-document builders contain HTML end tags inside JS strings.
+	// Escape at the final HTML boundary so the parser cannot terminate this script.
+	const scriptContent = getInlineScripts(lazyLoad).replace(/<\/script/gi, '<\\/script');
 	// jsQR / qrcode-generator 改为按需加载（见 utils.js 中的 ensureJsQR / ensureQRCodeGen），
 	// 避免 ~150KB CDN 库阻塞首屏渲染。Service Worker 会在首次请求时按需缓存这两个 URL。
 	return '<script>\n' + scriptContent + '\n</script>';

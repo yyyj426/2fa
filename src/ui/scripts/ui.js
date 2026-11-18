@@ -148,6 +148,7 @@ export function getUICode() {
 
       root.classList.add(animate ? 'theme-transition' : 'theme-instant');
       root.setAttribute('data-theme', nextTheme);
+      if (typeof notifyThemeRuntimeEnvironment === 'function') notifyThemeRuntimeEnvironment('theme');
       // Start cleanup after styles have painted, with a small margin over 180ms.
       afterPaint(() => {
         if (animate) change.timer = setTimeout(finish, 220);
@@ -204,6 +205,7 @@ export function getUICode() {
     }
 
     function showSecretModal(onShow) {
+      secretDialogCommandGuard = null;
       const modal = document.getElementById('secretModal');
       if (!modal) return;
       if (typeof trackModalClosed === 'function') trackModalClosed(modal);
@@ -230,8 +232,9 @@ export function getUICode() {
       }, 10);
     }
 
-    function showAddModal() {
+    function showAddModal(guard = {}) {
       showSecretModal(() => {
+        secretDialogCommandGuard = guard;
         editingId = null;
         document.getElementById('secretForm').reset();
         document.getElementById('secretId').value = '';
@@ -242,6 +245,7 @@ export function getUICode() {
     function hideSecretModal() {
       const modal = document.getElementById('secretModal');
       if (!modal || !secretDialogOpen) return;
+      secretDialogCommandGuard = null;
       if (typeof trackModalClosed === 'function') trackModalClosed(modal);
       const generation = ++secretDialogGeneration;
       secretDialogOpen = false;
@@ -286,12 +290,14 @@ export function getUICode() {
 
     // 折叠式菜单控制函数
     function toggleActionMenu() {
+      if (actionPresentation === 'toolbar') return;
       // 刚刚结束拖拽时忽略本次点击，避免拖完立刻弹菜单
       if (fabDragJustHappened) return;
       const mainBtn = document.getElementById('mainActionBtn');
       const submenu = document.getElementById('actionSubmenu');
       const overlay = document.getElementById('menuOverlay');
 
+      if (!mainBtn || !submenu || !overlay) return;
       const isActive = mainBtn.classList.contains('active');
 
       if (isActive) {
@@ -302,10 +308,12 @@ export function getUICode() {
     }
 
     function openActionMenu() {
+      if (actionPresentation === 'toolbar') return;
       const mainBtn = document.getElementById('mainActionBtn');
       const submenu = document.getElementById('actionSubmenu');
       const overlay = document.getElementById('menuOverlay');
 
+      if (!mainBtn || !submenu || !overlay) return;
       mainBtn.classList.add('active');
       mainBtn.setAttribute('aria-expanded', 'true');
       submenu.classList.add('show');
@@ -325,10 +333,10 @@ export function getUICode() {
       const submenu = document.getElementById('actionSubmenu');
       const overlay = document.getElementById('menuOverlay');
 
-      mainBtn.classList.remove('active');
-      mainBtn.setAttribute('aria-expanded', 'false');
-      submenu.classList.remove('show');
-      overlay.classList.remove('show');
+      mainBtn?.classList.remove('active');
+      mainBtn?.setAttribute('aria-expanded', 'false');
+      submenu?.classList.remove('show');
+      overlay?.classList.remove('show');
     }
 
     // 高级选项切换函数
@@ -388,6 +396,28 @@ export function getUICode() {
     // ========== FAB 拖拽：右下角"+"按钮可拖动并记住位置 ==========
     const FAB_POSITION_STORAGE_KEY = '2fa-fab-position';
     let fabDragJustHappened = false;
+    let actionPresentation = 'floating';
+    let disposeFABDrag = null;
+
+    function setActionPresentation(mode) {
+      const nextMode = mode === 'toolbar' ? 'toolbar' : 'floating';
+      if (disposeFABDrag) { disposeFABDrag(); disposeFABDrag = null; }
+      actionPresentation = nextMode;
+      document.documentElement.setAttribute('data-actions-mode', nextMode);
+      fabDragJustHappened = false;
+      const fab = document.querySelector('.action-menu-float');
+      const submenu = document.getElementById('actionSubmenu');
+      if (fab) {
+        fab.classList.remove('dragging');
+        ['left','top','right','bottom'].forEach(name => fab.style.removeProperty(name));
+      }
+      if (submenu) ['left','top','right','bottom'].forEach(name => submenu.style.removeProperty(name));
+      const initial = document.getElementById('fab-init-position');
+      if (initial) initial.remove();
+      if (document.getElementById('mainActionBtn') && submenu && document.getElementById('menuOverlay')) closeActionMenu();
+      if (nextMode === 'floating') initFABDrag();
+    }
+
 
     function loadFABPosition() {
       try {
@@ -400,6 +430,7 @@ export function getUICode() {
     }
 
     function saveFABPosition(x, y) {
+      if (actionPresentation !== 'floating') return;
       try {
         localStorage.setItem(FAB_POSITION_STORAGE_KEY, JSON.stringify({ x: x, y: y }));
       } catch (e) {}
@@ -444,6 +475,7 @@ export function getUICode() {
     }
 
     function applyFABPosition(x, y) {
+      if (actionPresentation !== 'floating') return null;
       const fab = document.querySelector('.action-menu-float');
       if (!fab) return null;
       const w = fab.offsetWidth || 48;
@@ -458,6 +490,7 @@ export function getUICode() {
 
     // 根据 FAB 位置自适应子菜单展开方向（上/下、左/右）
     function updateSubmenuDirection() {
+      if (actionPresentation !== 'floating') return;
       const fab = document.querySelector('.action-menu-float');
       const submenu = document.getElementById('actionSubmenu');
       if (!fab || !submenu) return;
@@ -486,6 +519,7 @@ export function getUICode() {
     }
 
     function initFABDrag() {
+      if (actionPresentation !== 'floating' || disposeFABDrag) return;
       const fab = document.querySelector('.action-menu-float');
       const btn = document.getElementById('mainActionBtn');
       if (!fab || !btn) return;
@@ -521,6 +555,7 @@ export function getUICode() {
       }
 
       function onDown(e) {
+        if (actionPresentation !== 'floating') return;
         if (e.button !== undefined && e.button !== 0) return;
         const p = getPoint(e);
         const rect = fab.getBoundingClientRect();
@@ -534,7 +569,7 @@ export function getUICode() {
       }
 
       function onMove(e) {
-        if (!dragging) return;
+        if (!dragging || actionPresentation !== 'floating') return;
         const p = getPoint(e);
         const dx = p.clientX - startPx;
         const dy = p.clientY - startPy;
@@ -552,7 +587,7 @@ export function getUICode() {
       }
 
       function onUp(e) {
-        if (!dragging) return;
+        if (!dragging || actionPresentation !== 'floating') return;
         dragging = false;
         fab.classList.remove('dragging');
         if (moved) {
@@ -583,7 +618,7 @@ export function getUICode() {
       document.addEventListener('touchcancel', onUp);
 
       // capture-phase 拦截拖拽结束后第一个 click，保证不会误触菜单
-      document.addEventListener('click', function(e) {
+      function onDragClick(e) {
         if (!fabDragJustHappened || !fab.contains(e.target)) {
           return;
         }
@@ -594,17 +629,265 @@ export function getUICode() {
         }
         e.stopPropagation();
         e.preventDefault();
-      }, true);
+      }
+      document.addEventListener('click', onDragClick, true);
 
       // 窗口尺寸变化时重新约束位置，并把约束后的坐标写回 storage，
       // 保证下次进入显示的位置与上次可见状态一致
-      window.addEventListener('resize', function() {
+      function onFABResize() {
+        if (actionPresentation !== 'floating') return;
         if (fab.style.left || fab.style.top) {
           const rect = fab.getBoundingClientRect();
           const next = applyFABPosition(rect.left, rect.top);
           if (next) saveFABPosition(next.x, next.y);
         }
-      });
+      }
+      window.addEventListener('resize', onFABResize);
+      disposeFABDrag = function() {
+        dragging = false;
+        moved = false;
+        fab.classList.remove('dragging');
+        if (dragClickSuppressTimer) clearTimeout(dragClickSuppressTimer);
+        btn.removeEventListener('mousedown', onDown);
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        btn.removeEventListener('touchstart', onDown);
+        document.removeEventListener('touchmove', onMove);
+        document.removeEventListener('touchend', onUp);
+        document.removeEventListener('touchcancel', onUp);
+        document.removeEventListener('click', onDragClick, true);
+        window.removeEventListener('resize', onFABResize);
+      };
     }
 `;
+}
+
+/** Host-owned flows remain reachable when the account view uses a different DOM. */
+export function getHostFlowsCode() {
+	return `
+    const themeHostDialogOwners = new Map();
+    const themeHostChildren = new Map();
+    const themeHostSuspensions = new WeakMap();
+    function themeModalVisible(modal) {
+      return Boolean(modal && modal.isConnected && !modal.hidden && !modal.inert && modal.style.display !== 'none'
+        && (modal.style.display === 'flex' || modal.classList.contains('show')));
+    }
+    function focusThemeHostControl(target) {
+      if (!target?.isConnected || target.disabled || target.closest?.('[hidden],[inert]')) return;
+      const modal = target.closest?.('.modal');
+      if (modal && (!themeModalVisible(modal) || modal.style.visibility === 'hidden')) return;
+      target.focus?.({preventScroll:true});
+    }
+    // Keep the parent flow alive while its child is open. No delayed callback
+    // can resurrect a dismissed parent or an invalidated application scope.
+    function openThemeHostChild(parentId, childId, open, close, moduleName = 'tools') {
+      const parent = document.getElementById(parentId);
+      if (!themeModalVisible(parent)) return {status:'rejected',reason:'parent-unavailable'};
+      const owner = themeHostDialogOwners.get(parentId);
+      const parentSession = typeof modalSessions !== 'undefined' ? modalSessions.get(parent) : null;
+      const session = typeof secretSessionGeneration === 'number' ? secretSessionGeneration : null;
+      const trigger = parent.contains(document.activeElement) ? document.activeElement : parent.querySelector('.close-btn');
+      const valid = () => themeModalVisible(parent)
+        && (typeof modalSessions === 'undefined' || modalSessions.get(parent) === parentSession)
+        && (session === null || secretSessionGeneration === session)
+        && (!owner || (owner.active && owner.context.isCurrent() && themeHostDialogOwners.get(parentId) === owner));
+      const pending = {};
+      owner?.pendingChildren.add(pending);
+      const invoke = () => {
+        if (!valid()) return {status:'rejected',reason:'mount-invalidated'};
+        if (themeHostChildren.has(childId) || themeModalVisible(document.getElementById(childId))) return {status:'rejected',reason:'dialog-busy'};
+        const previousVisibility = parent.style.visibility;
+        let observer, unsubscribe, ended = false;
+        const child = document.getElementById(childId);
+        const relation = {
+          cancel() { finish(false); },
+          owner
+        };
+        function finish(returning) {
+          if (ended) return;
+          ended = true; observer?.disconnect(); unsubscribe?.();
+          if (themeHostChildren.get(childId) === relation) themeHostChildren.delete(childId);
+          owner?.children.delete(relation);
+          const ownsSuspension = themeHostSuspensions.get(parent) === relation;
+          try {
+            if (ownsSuspension && parent.style.visibility === 'hidden') {
+              if (previousVisibility) parent.style.visibility = previousVisibility; else parent.style.removeProperty('visibility');
+            }
+            if (!returning && themeModalVisible(child)) close();
+            if (ownsSuspension) {
+              // Resolve inherited visibility with transitions still suspended.
+              // Otherwise transition:all can leave the trigger unfocusable.
+              const visibility = getComputedStyle(trigger?.isConnected ? trigger : parent).visibility;
+              if (returning && valid() && visibility !== 'hidden' && visibility !== 'collapse') focusThemeHostControl(trigger);
+            }
+          } finally {
+            // A focus/close handler can synchronously start a newer relation.
+            if (themeHostSuspensions.get(parent) === relation) {
+              themeHostSuspensions.delete(parent);
+              parent.removeAttribute('data-theme-host-suspended');
+            }
+          }
+        }
+        try {
+          open();
+          if (!valid() || !themeModalVisible(child)) { finish(false); return {status:'rejected',reason:'dialog-unavailable'}; }
+          themeHostChildren.set(childId, relation); owner?.children.add(relation);
+          themeHostSuspensions.set(parent, relation);
+          parent.setAttribute('data-theme-host-suspended', '');
+          parent.style.visibility = 'hidden';
+          const inspect = () => {
+            if (!valid()) finish(false);
+            else if (!themeModalVisible(child)) finish(true);
+          };
+          observer = new MutationObserver(records => {
+            if (records.some(record => record.target === child || record.target === parent)) inspect();
+          });
+          observer.observe(document.body,{subtree:true,attributes:true,attributeFilter:['style','class','hidden','inert']});
+          if (typeof accountStore !== 'undefined') unsubscribe = accountStore.subscribe(inspect);
+          return {status:'opening'};
+        } catch (error) { finish(false); throw error; }
+      };
+      const ready = () => { try { return invoke(); } finally { owner?.pendingChildren.delete(pending); } };
+      if (moduleName && typeof loadModule === 'function') return loadModule(moduleName).then(ready, () => {
+        owner?.pendingChildren.delete(pending);return {status:'rejected',reason:'module-unavailable'};
+      });
+      return ready();
+    }
+    function openThemeToolChild(childId, open, close) {
+      if (themeModalVisible(document.getElementById('toolsModal'))) return openThemeHostChild('toolsModal',childId,open,close,null);
+      return open();
+    }
+    function openToolsFromMenu(kind) {
+      const entries = {
+        'qr-decode':['qrDecodeModal',()=>{if(typeof ensureJsQR==='function')ensureJsQR().catch(()=>{});showQRDecodeModal();},()=>hideQRDecodeModal()],
+        'qr-generate':['qrGenerateModal',()=>{if(typeof ensureQRCodeGen==='function')ensureQRCodeGen().catch(()=>{});showQRGenerateModal();},()=>hideQRGenerateModal()],
+        base32:['base32Modal',()=>showBase32Modal(),()=>hideBase32Modal()],
+        timestamp:['timestampModal',()=>showTimestampModal(),()=>hideTimestampModal()],
+        'key-check':['keyCheckModal',()=>showKeyCheckModal(),()=>hideKeyCheckModal()],
+        'key-generate':['keyGeneratorModal',()=>showKeyGeneratorModal(),()=>hideKeyGeneratorModal()]
+      };
+      const entry=entries[kind];
+      return entry ? openThemeHostChild('toolsModal',...entry) : {status:'rejected',reason:'invalid-tool'};
+    }
+    function openThemeHostDialog(modalId, open, context, moduleName = null) {
+      const invoke = () => {
+        if (!context.isCurrent()) return { status: 'session-invalidated' };
+        if (themeHostDialogOwners.get(modalId)?.active) return {status:'rejected',reason:'dialog-busy'};
+        const owner = {active:true,context,children:new Set(),pendingChildren:new Set()};
+        themeHostDialogOwners.set(modalId,owner);
+        let observer = null;
+        let opened = false;
+        let settled = false;
+        let finish;
+        let ownedSecretGeneration = null;
+        const originalSecretGeneration = typeof secretDialogGeneration === 'number' ? secretDialogGeneration : null;
+        const captureSecretOwnership = () => { if (ownedSecretGeneration === null && modalId === 'secretModal' && typeof secretDialogGeneration === 'number' && secretDialogGeneration !== originalSecretGeneration && typeof secretDialogCommandGuard !== 'undefined' && secretDialogCommandGuard?.isCurrent === context.isCurrent) ownedSecretGeneration = secretDialogGeneration; };
+        const invalidated = () => {
+          const navigating = owner.children.size > 0 || owner.pendingChildren.size > 0;
+          owner.active = false;
+          for (const child of [...owner.children]) child.cancel();
+          if (ownedSecretGeneration !== null && secretDialogGeneration === ownedSecretGeneration && typeof hideSecretModal === 'function') hideSecretModal();
+          // An ordinary open settings form outlives its observer. Only a
+          // still-owned aggregate transition is withdrawn with its child.
+          if (navigating && ['settingsModal','toolsModal'].includes(modalId) && typeof hideModal === 'function') hideModal(modalId);
+          finish({ status: 'rejected', reason: 'mount-invalidated' });
+        };
+        const closed = new Promise(resolve => { finish = result => {
+          if (settled) return; settled = true; owner.active=false;
+          owner.pendingChildren.clear();
+          for (const child of [...owner.children]) child.cancel();
+          if(themeHostDialogOwners.get(modalId)===owner)themeHostDialogOwners.delete(modalId);
+          observer?.disconnect(); context.signal?.removeEventListener('abort', invalidated); resolve(result);
+        }; });
+        context.signal?.addEventListener('abort', invalidated, { once: true });
+        const inspect = () => {
+          const modal = document.getElementById(modalId);
+          const visible = Boolean(modal && !modal.hidden && modal.style.display !== 'none' && (modal.style.display || modal.classList.contains('show')));
+          if (visible) opened = true;
+          else if (opened) finish({ status: 'closed' });
+        };
+        if (typeof MutationObserver === 'function') {
+          observer = new MutationObserver(inspect);
+          observer.observe(document.body, { attributes: true, childList: true, subtree: true, attributeFilter: ['style', 'class', 'hidden'] });
+        }
+        let result;
+        try { result = open(); captureSecretOwnership(); inspect(); } catch { finish({ status: 'rejected', reason: 'flow-failed' }); return { closed }; }
+        Promise.resolve(result).then(value => {
+          captureSecretOwnership();
+          inspect();
+          if (value && ['rejected', 'session-invalidated', 'cancelled'].includes(value.status)) finish(value);
+          else if (!opened) finish({ status: 'rejected', reason: 'dialog-unavailable' });
+          else if (!observer) finish({ status: 'unknown', reason: 'dialog-observer-unavailable' });
+        }, () => finish({ status: 'rejected', reason: 'flow-failed' }));
+        return { closed };
+      };
+      if (moduleName && typeof loadModule === 'function') return loadModule(moduleName).then(invoke);
+      return invoke();
+    }
+
+    function openThemeHostPanel(panelId, title, context) {
+      const panel = document.getElementById(panelId);
+      if (!panel) return { status: 'rejected', reason: 'panel-unavailable' };
+      const oldParent = panel.parentNode;
+      const oldNext = panel.nextSibling;
+      let modal = document.getElementById('themeHostStatusModal');
+      if (!modal) {
+        modal = document.createElement('div'); modal.id = 'themeHostStatusModal'; modal.className = 'modal'; modal.style.display = 'none';
+        modal.setAttribute('role', 'dialog'); modal.setAttribute('aria-modal', 'true'); modal.dataset.part = 'dialog'; modal.dataset.dialogKind = 'passive';
+        const content = document.createElement('div'); content.className = 'modal-content';
+        const heading = document.createElement('h2'); heading.id = 'themeHostStatusTitle'; content.append(heading); modal.setAttribute('aria-labelledby', heading.id);
+        const body = document.createElement('div'); body.id = 'themeHostStatusBody'; content.append(body);
+        const close = document.createElement('button'); close.type = 'button'; close.className = 'btn btn-secondary'; close.setAttribute('data-dialog-dismiss',''); close.textContent = t('close'); close.onclick = () => hideModal('themeHostStatusModal'); content.append(close);
+        modal.append(content); document.body.append(modal);
+      }
+      if (modal.style.display !== 'none') return { status: 'rejected', reason: 'dialog-busy' };
+      document.getElementById('themeHostStatusTitle').textContent = title;
+      const flow = openThemeHostDialog('themeHostStatusModal', () => {
+        document.getElementById('themeHostStatusBody').append(panel);
+        showModal('themeHostStatusModal');
+      }, context);
+      flow.closed?.then(() => {
+        if (oldParent?.isConnected) oldParent.insertBefore(panel, oldNext?.parentNode === oldParent ? oldNext : null);
+        else document.getElementById('hostThemePanels')?.append(panel);
+      });
+      return flow;
+    }
+
+    function getThemeHostHandlers() {
+      const dialog = (id, open, context, moduleName) => openThemeHostDialog(id, open, context, moduleName);
+      const tools = {
+        'qr-decode': ['qrDecodeModal', () => showQRScanAndDecode()], 'qr-generate': ['qrGenerateModal', () => showQRGenerateTool()],
+        'base32': ['base32Modal', () => showBase32Tool()], 'timestamp': ['timestampModal', () => showTimestampTool()],
+        'key-check': ['keyCheckModal', () => showKeyCheckTool()], 'key-generate': ['keyGeneratorModal', () => showKeyGeneratorTool()]
+      };
+      const providers = { webdav: ['webdavModal', () => showWebdavTool()], s3: ['s3Modal', () => showS3Tool()], onedrive: ['oneDriveModal', () => showOneDriveTool()], gdrive: ['googleDriveModal', () => showGoogleDriveTool()] };
+      return {
+        login: (request, context) => dialog('loginModal', () => showLoginModal(), context),
+        logout: async () => { const serverConfirmed = await logout(); return { status: serverConfirmed ? 'completed' : 'unknown', reason: serverConfirmed ? 'logout-server-confirmed' : 'logout-local-only' }; },
+        'account-add': (request, context) => dialog('secretModal', () => showAddModal({ isCurrent: context.isCurrent }), context),
+        'account-edit': (request, context) => dialog('secretModal', () => editSecret(request.account.id, { isCurrent: context.isCurrent }), context),
+        'account-delete': (request, context) => deleteSecret(request.account.id, { isCurrent: context.isCurrent }),
+        'account-qr': (request, context) => dialog('qrModal', () => showQRCode(request.account.id), context, 'qrcode'),
+        'scan-import': (request, context) => dialog('qrScanModal', () => showQRScanner(), context, 'qrcode'),
+        import: (request, context) => dialog('importModal', () => showImportModal(), context, 'import'),
+        export: (request, context) => dialog('exportFormatModal', () => showExportFormatModal(), context, 'export'),
+        backup: (request, context) => dialog('restoreModal', () => showRestoreModal(), context, 'backup'),
+        tools: (request, context) => dialog('toolsModal', () => showToolsModal(), context),
+        tool: (request, context) => { const [id, open] = tools[request.tool]; return dialog(id, open, context, 'tools'); },
+        settings: (request, context) => dialog('settingsModal', () => { showSettingsModal(); switchSettingsTab(request.section); }, context),
+        'sync-provider': (request, context) => { const [id, open] = providers[request.provider]; return dialog(id, open, context, 'tools'); },
+        appearance: (request, context) => dialog('appearanceModal', () => window.showAppearanceEditor(), context, 'appearance'),
+        recovery: () => { const result = getThemeRuntime().sdk.lifecycle.requestReload('recovery'); return result; },
+        'hidden-accounts': (request, context) => { hiddenSecretsExpanded = true; renderHiddenSecretsNotice(); return openThemeHostPanel('hiddenSecrets', t('pageHiddenAccounts'), context); },
+        'offline-queue': (request, context) => { offlineQueueExpanded = true; renderOfflineQueue(); void refreshOfflineQueue(); return openThemeHostPanel('offlineQueue', t('offlineQueueView'), context); },
+        'offline-queue-edit': (request, context) => dialog('secretModal', () => openOfflineQueueEditor(request.operationId, { isCurrent: context.isCurrent }), context),
+        'offline-queue-retry': (request, context) => changeOfflineQueueOperation('OFFLINE_QUEUE_RETRY', request.operationId, { isCurrent: context.isCurrent }),
+        'offline-queue-cancel': (request, context) => changeOfflineQueueOperation('OFFLINE_QUEUE_CANCEL', request.operationId, { isCurrent: context.isCurrent }),
+        'offline-queue-status-retry': () => refreshOfflineQueue(),
+        extension: (request, context) => dialog('browserExtensionModal', () => showBrowserExtensionModal(), context),
+        'pwa-install': () => triggerPwaInstallFromSettings(),
+        'quick-otp': () => { window.location.assign('/otp'); return { status: 'completed' }; }
+      };
+    }
+  `;
 }
